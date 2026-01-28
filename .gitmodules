@@ -2,3 +2,6 @@
 	path = DQN_ATARY
 	url = git@github.com:MykolaVaskevych/DQN_ATARY.git
 	branch = main
+[submodule "paper_overleaf"]
+	path = paper_overleaf
+	url = git@github.com:MykolaVaskevych/paper_overleaf.git
