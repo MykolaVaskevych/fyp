@@ -1,0 +1,4 @@
+[submodule "DQN_ATARY"]
+	path = DQN_ATARY
+	url = git@github.com:MykolaVaskevych/DQN_ATARY.git
+	branch = main
