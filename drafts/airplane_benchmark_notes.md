@@ -29,4 +29,3 @@ so use many seeds
 randomeness is a bitch. state my pc. state all shit.
 
 note 95 % confidence, its randomness shit.
-:w
