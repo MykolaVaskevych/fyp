@@ -1,0 +1,5 @@
+# Training results — models, checkpoints, eval logs
+results/
+
+# Marimo session state
+__marimo__/
