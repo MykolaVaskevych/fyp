@@ -2,9 +2,8 @@ import marimo
 
 __generated_with = "0.19.10"
 app = marimo.App(
-    width="medium",
-    app_title="A2C Evaluation Report",
-    layout_file="layouts/report.slides.json",
+    width="full",
+    app_title="RL Multi-Algorithm Evaluation Report",
 )
 
 
@@ -13,110 +12,143 @@ def _():
     import json
     from pathlib import Path
 
+    import altair as alt
     import marimo as mo
-    import matplotlib.pyplot as plt
     import numpy as np
-    import seaborn as sns
+    import pandas as pd
 
-    tex_fonts = {
-        "text.usetex": True,
-        "font.family": "serif",
-        "axes.labelsize": 12,
-        "font.size": 12,
-        "legend.fontsize": 10,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
-    }
-    sns.set_theme(style="whitegrid", palette="colorblind")
-    plt.rcParams.update(tex_fonts)
-    return Path, json, mo, np, plt, sns
+    return Path, alt, json, mo, np, pd
 
 
 @app.cell
-def _(Path):
+def _(Path, alt):
     # --- Config ---
     BASE_DIR = Path(__file__).parent.parent
     RESULTS_DIR = BASE_DIR / "results"
     METRICS_DIR = RESULTS_DIR / "metrics"
-    FIGURES_DIR = RESULTS_DIR / "figures"
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
     ALGO_COLORS = {
         "a2c": "#1f77b4",
         "dqn": "#ff7f0e",
         "ppo": "#2ca02c",
+        "qrdqn": "#d62728",
+        "rppo": "#9467bd",
     }
-    TEX_WIDTH = 412.56496
-    # Scale factor so figures are readable in marimo — saved PNGs
-    # can be rescaled for LaTeX later via \includegraphics[width=...]
-    FIG_SCALE = 1.6
-    DPI = 600
+    ALGO_LABELS = {
+        "a2c": "A2C",
+        "dqn": "DQN",
+        "ppo": "PPO",
+        "qrdqn": "QR-DQN",
+        "rppo": "RecurrentPPO",
+    }
 
+    ALGO_COLOR_SCALE = alt.Scale(
+        domain=list(ALGO_LABELS.values()), range=list(ALGO_COLORS.values())
+    )
 
-    def set_size(width_pt, fraction=1, subplots=(1, 1)):
-        """Set figure dimensions, scaled up for notebook readability."""
-        fig_width_pt = width_pt * fraction
-        inches_per_pt = 1 / 72.27
-        golden_ratio = (5**0.5 - 1) / 2
-        fig_width_in = fig_width_pt * inches_per_pt * FIG_SCALE
-        fig_height_in = fig_width_in * golden_ratio * (subplots[0] / subplots[1])
-        return (fig_width_in, fig_height_in)
+    def algo_selection():
+        """Reusable legend-bound selection for algo toggle."""
+        return alt.selection_point(fields=["Algorithm"], bind="legend")
 
     return (
         ALGO_COLORS,
-        DPI,
-        FIGURES_DIR,
+        ALGO_COLOR_SCALE,
+        ALGO_LABELS,
         METRICS_DIR,
         RESULTS_DIR,
-        TEX_WIDTH,
-        set_size,
+        algo_selection,
     )
 
 
 @app.cell
-def _(METRICS_DIR, RESULTS_DIR, json, np):
-    # --- Load evaluation results ---
-    with open(METRICS_DIR / "evaluation_results.json") as _f:
-        eval_results = json.load(_f)
+def _(ALGO_COLORS, ALGO_LABELS, METRICS_DIR, RESULTS_DIR, json, np):
+    # --- Discover ALL algos from metrics dirs ---
+    all_algos = sorted(
+        d.name
+        for d in METRICS_DIR.iterdir()
+        if d.is_dir() and (d / "evaluation_results.json").exists()
+    )
 
-    env_slugs = eval_results["environments"]
-    score_matrix = np.load(METRICS_DIR / "score_matrix.npy")
-    random_baselines = eval_results["random_baselines"]  # slug → float
+    algo_eval_results = {}
+    algo_lc_data = {}
+    algo_se_data = {}
+    algo_score_matrices = {}
+    algo_raw_score_matrices = {}
+    algo_configs = {}
 
-    # Per-env data dicts keyed by slug
-    lc_data = {}
-    se_data = {}
-    env_configs = {}
-    for _slug in env_slugs:
-        lc_data[_slug] = np.load(METRICS_DIR / "learning_curves" / f"{_slug}.npz")
-        se_data[_slug] = np.load(
-            METRICS_DIR / "sample_efficiency" / f"{_slug}.npz"
-        )
-        _config_path = RESULTS_DIR / "a2c" / _slug / "config.json"
-        with open(_config_path) as _f:
-            env_configs[_slug] = json.load(_f)
+    for _algo in all_algos:
+        _algo_metrics = METRICS_DIR / _algo
+
+        with open(_algo_metrics / "evaluation_results.json") as _f:
+            algo_eval_results[_algo] = json.load(_f)
+
+        algo_score_matrices[_algo] = np.load(_algo_metrics / "score_matrix.npy")
+
+        _raw_path = _algo_metrics / "raw_score_matrix.npy"
+        if _raw_path.exists():
+            algo_raw_score_matrices[_algo] = np.load(_raw_path)
+
+        _slugs = algo_eval_results[_algo]["environments"]
+        algo_lc_data[_algo] = {}
+        algo_se_data[_algo] = {}
+        algo_configs[_algo] = {}
+        for _slug in _slugs:
+            algo_lc_data[_algo][_slug] = np.load(
+                _algo_metrics / "learning_curves" / f"{_slug}.npz"
+            )
+            algo_se_data[_algo][_slug] = np.load(
+                _algo_metrics / "sample_efficiency" / f"{_slug}.npz"
+            )
+            _config_path = RESULTS_DIR / _algo / _slug / "config.json"
+            with open(_config_path) as _f:
+                algo_configs[_algo][_slug] = json.load(_f)
+
+    # Pairwise P(X>Y)
+    _poi_path = METRICS_DIR / "pairwise_poi.json"
+    pairwise_poi = {}
+    if _poi_path.exists():
+        with open(_poi_path) as _f:
+            pairwise_poi = json.load(_f)
+
+    # Shared across all algos (from first algo)
+    _first = all_algos[0]
+    env_slugs = algo_eval_results[_first]["environments"]
+    random_baselines = algo_eval_results[_first]["random_baselines"]
+    env_configs = algo_configs[_first]
+
+    # Altair color helpers — filtered to only discovered algos
+    algo_color_domain = [ALGO_LABELS[a] for a in all_algos]
+    algo_color_range = [ALGO_COLORS[a] for a in all_algos]
     return (
+        algo_color_domain,
+        algo_color_range,
+        algo_eval_results,
+        algo_lc_data,
+        algo_score_matrices,
+        algo_se_data,
+        all_algos,
         env_configs,
         env_slugs,
-        eval_results,
-        lc_data,
+        pairwise_poi,
         random_baselines,
-        score_matrix,
-        se_data,
     )
 
 
 @app.cell
 def _(
+    algo_eval_results,
+    all_algos,
     env_configs,
     env_slugs,
-    eval_results,
     mo,
     random_baselines,
-    score_matrix,
 ):
-    n_seeds = score_matrix.shape[0]
-    n_envs = score_matrix.shape[1]
+    _first = all_algos[0]
+    _n_seeds = algo_eval_results[_first]["n_seeds"]
+    _n_envs = len(env_slugs)
+    _n_eval_episodes = algo_eval_results[_first]["n_eval_episodes"]
+
+    _algo_list = ", ".join(a.upper() for a in all_algos)
 
     _env_rows = ""
     for _slug in env_slugs:
@@ -129,15 +161,15 @@ def _(
         )
 
     mo.md(f"""
-    # A2C Evaluation Report
+    # Multi-Algorithm Evaluation Report
 
-    **Algorithm:** A2C (Advantage Actor-Critic) with MlpPolicy (SB3 defaults)
+    **Algorithms:** {_algo_list}
 
     | Parameter | Value |
     |-----------|-------|
-    | Seeds | {n_seeds} |
-    | Environments | {n_envs} |
-    | Eval episodes/seed | {eval_results["n_eval_episodes"]} |
+    | Seeds | {_n_seeds} |
+    | Environments | {_n_envs} |
+    | Eval episodes/seed | {_n_eval_episodes} |
 
     **Per-environment training config:**
 
@@ -152,329 +184,1002 @@ def _(
 
 @app.cell
 def _(
-    ALGO_COLORS,
-    DPI,
-    FIGURES_DIR,
-    TEX_WIDTH,
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_lc_data,
+    algo_selection,
+    all_algos,
+    alt,
     env_configs,
     env_slugs,
-    lc_data,
     mo,
-    np,
-    plt,
+    pd,
     random_baselines,
-    set_size,
 ):
-    # --- Per-env learning curves: 2-panel (mean±std, median+IQR) ---
-    _figs = []
+    # --- Per-env learning curves: dual-panel (mean±std, median+IQR) ---
+    _views = []
     for _slug in env_slugs:
-        _ld = lc_data[_slug]
         _max_ret = env_configs[_slug]["max_return"]
         _rand = random_baselines[_slug]
-        _ts = _ld["timesteps"] / 1000
-        _mean = _ld["mean"]
-        _std = _ld["std"]
-        _median = _ld["median"]
-        _p25 = _ld["p25"]
-        _p75 = _ld["p75"]
-        _c = ALGO_COLORS["a2c"]
-
-        _fig, (_ax1, _ax2) = plt.subplots(
-            1, 2, figsize=set_size(TEX_WIDTH, subplots=(1, 2)), sharey=True
-        )
-
-        _ax1.plot(_ts, _mean, color=_c, linewidth=1.0, label="Mean")
-        _ax1.fill_between(
-            _ts,
-            _mean - _std,
-            np.minimum(_mean + _std, _max_ret),
-            alpha=0.2,
-            color=_c,
-        )
-        _ax1.axhline(
-            _max_ret,
-            color="gray",
-            linestyle="--",
-            alpha=0.5,
-            label=f"Max ({_max_ret:.0f})",
-        )
-        _ax1.axhline(
-            _rand,
-            color="orange",
-            linestyle="--",
-            alpha=0.6,
-            label=f"Random ({_rand:.0f})",
-        )
-        _ax1.set_xlabel(r"Timesteps ($\times 10^3$)")
-        _ax1.set_ylabel("Eval Return")
-        _ax1.set_title(r"Mean $\pm$ Std")
-        _ax1.legend()
-
-        _ax2.plot(_ts, _median, color=_c, linewidth=1.0, label="Median")
-        _ax2.fill_between(
-            _ts,
-            _p25,
-            np.minimum(_p75, _max_ret),
-            alpha=0.2,
-            color=_c,
-            label=r"IQR (25--75\%)",
-        )
-        _ax2.axhline(_max_ret, color="gray", linestyle="--", alpha=0.5)
-        _ax2.axhline(_rand, color="orange", linestyle="--", alpha=0.6)
-        _ax2.set_xlabel(r"Timesteps ($\times 10^3$)")
-        _ax2.set_title("Median + IQR")
-        _ax2.legend()
-
         _env_name = env_configs[_slug]["environment"]
-        _fig.suptitle(f"Learning Curves — {_env_name}", y=1.02)
-        _fig.tight_layout()
-        _fig.savefig(
-            FIGURES_DIR / f"learning_curves_{_slug}.png",
-            format="png",
-            dpi=DPI,
-            bbox_inches="tight",
+
+        # Build DataFrames for mean±std and median+IQR
+        _mean_records = []
+        _median_records = []
+        for _algo in all_algos:
+            if _slug not in algo_lc_data[_algo]:
+                continue
+            _ld = algo_lc_data[_algo][_slug]
+            _ts = _ld["timesteps"] / 1000
+            for _k in range(len(_ts)):
+                _mean_records.append({
+                    "Timesteps (k)": float(_ts[_k]),
+                    "Return": float(_ld["mean"][_k]),
+                    "Upper": float(min(_ld["mean"][_k] + _ld["std"][_k], _max_ret)),
+                    "Lower": float(_ld["mean"][_k] - _ld["std"][_k]),
+                    "Algorithm": ALGO_LABELS[_algo],
+                })
+                _median_records.append({
+                    "Timesteps (k)": float(_ts[_k]),
+                    "Return": float(_ld["median"][_k]),
+                    "Upper": float(min(float(_ld["p75"][_k]), _max_ret)),
+                    "Lower": float(_ld["p25"][_k]),
+                    "Algorithm": ALGO_LABELS[_algo],
+                })
+
+        # Reference line data
+        _ref_df = pd.DataFrame([
+            {"y": _max_ret, "label": f"Max ({_max_ret:.0f})"},
+            {"y": _rand, "label": f"Random ({_rand:.0f})"},
+        ])
+
+        def _make_panel(df, title, ref_df):
+            _sel = algo_selection()
+            _base = alt.Chart(df).encode(
+                x=alt.X("Timesteps (k):Q"),
+                color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+                opacity=alt.condition(_sel, alt.value(1), alt.value(0.15)),
+            ).add_params(_sel)
+            _line = _base.mark_line().encode(
+                y=alt.Y("Return:Q"),
+                tooltip=["Algorithm:N", "Timesteps (k):Q", "Return:Q"],
+            )
+            _band = alt.Chart(df).mark_area().encode(
+                x=alt.X("Timesteps (k):Q"),
+                y="Lower:Q", y2="Upper:Q",
+                color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+                opacity=alt.condition(_sel, alt.value(0.15), alt.value(0.03)),
+            ).add_params(_sel)
+            _rules = (
+                alt.Chart(ref_df)
+                .mark_rule(strokeDash=[4, 4], opacity=0.6)
+                .encode(y="y:Q")
+            )
+            _rule_text = (
+                alt.Chart(ref_df)
+                .mark_text(align="left", dx=5, dy=-8, fontSize=10)
+                .encode(
+                    y="y:Q",
+                    text="label:N",
+                    x=alt.value(0),
+                )
+            )
+            return (_band + _line + _rules + _rule_text).properties(
+                title=title, width=420, height=260,
+            ).interactive()
+
+        _mean_chart = _make_panel(
+            pd.DataFrame(_mean_records), f"{_env_name} — Mean ± Std", _ref_df
         )
-        _figs.append(_fig)
-    mo.vstack(_figs)
+        _median_chart = _make_panel(
+            pd.DataFrame(_median_records), f"{_env_name} — Median + IQR", _ref_df
+        )
+        _views.append(_mean_chart | _median_chart)
+
+    mo.vstack(_views)
     return
 
 
 @app.cell
 def _(
-    ALGO_COLORS,
-    DPI,
-    FIGURES_DIR,
-    TEX_WIDTH,
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_lc_data,
+    algo_selection,
+    all_algos,
+    alt,
     env_configs,
     env_slugs,
-    plt,
+    pd,
     random_baselines,
-    score_matrix,
-    set_size,
-    sns,
 ):
-    # --- Score distribution: violin + strip plot (one panel per env) ---
-    _n_envs = len(env_slugs)
-    _fig, _axes = plt.subplots(
-        1, _n_envs, figsize=set_size(TEX_WIDTH, subplots=(1, _n_envs))
-    )
-    if _n_envs == 1:
-        _axes = [_axes]
+    # --- Combined learning curves: faceted by env, all algos overlaid ---
+    _all_records = []
+    _env_refs = {}
+    for _slug in env_slugs:
+        _env_name = env_configs[_slug]["environment"]
+        _env_refs[_env_name] = {
+            "Max Return": env_configs[_slug]["max_return"],
+            "Random Baseline": random_baselines[_slug],
+        }
+        for _algo in all_algos:
+            if _slug not in algo_lc_data[_algo]:
+                continue
+            _ld = algo_lc_data[_algo][_slug]
+            _ts = _ld["timesteps"] / 1000
+            for _k in range(len(_ts)):
+                _all_records.append({
+                    "Timesteps (k)": float(_ts[_k]),
+                    "Mean Return": float(_ld["mean"][_k]),
+                    "Algorithm": ALGO_LABELS[_algo],
+                    "Environment": _env_name,
+                })
 
+    _df = pd.DataFrame(_all_records)
+    _df["Max Return"] = _df["Environment"].map(lambda e: _env_refs[e]["Max Return"])
+    _df["Random Baseline"] = _df["Environment"].map(lambda e: _env_refs[e]["Random Baseline"])
+    _sel = algo_selection()
+    _env_order = [env_configs[s]["environment"] for s in env_slugs]
+
+    _base = alt.Chart(_df)
+    _lines = (
+        _base
+        .mark_line(strokeWidth=1.5)
+        .encode(
+            x=alt.X("Timesteps (k):Q"),
+            y=alt.Y("Mean Return:Q"),
+            color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+            opacity=alt.condition(_sel, alt.value(1), alt.value(0.15)),
+            tooltip=["Algorithm:N", "Timesteps (k):Q", "Mean Return:Q"],
+        )
+        .add_params(_sel)
+    )
+    _max_rule = _base.mark_rule(strokeDash=[4, 4], color="gray", opacity=0.5).encode(
+        y="Max Return:Q"
+    )
+    _rand_rule = _base.mark_rule(strokeDash=[4, 4], color="orange", opacity=0.5).encode(
+        y="Random Baseline:Q"
+    )
+    _chart = (
+        alt.layer(_lines, _max_rule, _rand_rule)
+        .properties(width=280, height=200)
+        .interactive()
+        .facet(column=alt.Column("Environment:N", sort=_env_order))
+        .resolve_scale(y="independent")
+    )
+    _chart
+    return
+
+
+@app.cell
+def _(
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_score_matrices,
+    all_algos,
+    alt,
+    env_configs,
+    env_slugs,
+    pd,
+    random_baselines,
+):
+    # --- Score distribution: boxplot + strip per env ---
+    _all_records = []
+    _env_refs = {}
     for _i, _slug in enumerate(env_slugs):
-        _scores_norm = score_matrix[:, _i]
         _max_ret = env_configs[_slug]["max_return"]
         _rand = random_baselines[_slug]
-        _raw = _scores_norm * (_max_ret - _rand) + _rand
         _env_name = env_configs[_slug]["environment"]
-        _ax = _axes[_i]
+        _env_refs[_env_name] = {"Max Return": _max_ret, "Random Baseline": _rand}
+        for _algo in all_algos:
+            _sm = algo_score_matrices[_algo]
+            _scores_norm = _sm[:, _i]
+            _raw = _scores_norm * (_max_ret - _rand) + _rand
+            for _si, _s in enumerate(_raw):
+                _all_records.append({
+                    "Score": float(_s),
+                    "Algorithm": ALGO_LABELS[_algo],
+                    "Environment": _env_name,
+                    "Seed": _si,
+                })
 
-        sns.violinplot(
-            y=_raw, ax=_ax, inner=None, color=ALGO_COLORS["a2c"], alpha=0.6
-        )
-        sns.swarmplot(
-            y=_raw, ax=_ax, color="black", edgecolor="white", linewidth=0.5,
-            size=6, alpha=0.8, label="Seed" if _i == 0 else None,
-        )
-        _ax.axhline(
-            _max_ret,
-            color="gray",
-            linestyle="--",
-            alpha=0.7,
-            label=f"Max ({_max_ret:.0f})",
-        )
-        _ax.axhline(
-            _rand,
-            color="orange",
-            linestyle="--",
-            alpha=0.7,
-            label=f"Random ({_rand:.0f})",
-        )
-        _ax.set_title(_env_name)
-        _ax.set_ylabel("Mean Eval Return")
-        _ax.set_xlabel("")
-        _ax.set_xticks([])
-        _ax.legend(fontsize=8)
+    _adf = pd.DataFrame(_all_records)
+    _adf["Max Return"] = _adf["Environment"].map(lambda e: _env_refs[e]["Max Return"])
+    _adf["Random Baseline"] = _adf["Environment"].map(lambda e: _env_refs[e]["Random Baseline"])
 
-    _fig.suptitle("Score Distribution", y=1.02)
-    _fig.tight_layout()
-    _fig.savefig(
-        FIGURES_DIR / "score_distribution.png",
-        format="png",
-        dpi=DPI,
-        bbox_inches="tight",
+    _base = alt.Chart(_adf)
+    _box = _base.mark_boxplot(extent="min-max", size=30, median={"color": "black"}).encode(
+        x=alt.X("Algorithm:N"),
+        y=alt.Y("Score:Q"),
+        color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
     )
-    _fig
+    _points = _base.mark_circle(size=30, opacity=0.6).encode(
+        x=alt.X("Algorithm:N"),
+        y=alt.Y("Score:Q"),
+        color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+        tooltip=["Algorithm:N", "Score:Q", "Seed:Q"],
+    )
+    _max_rule = _base.mark_rule(
+        strokeDash=[4, 4], color="gray", opacity=0.6
+    ).encode(y="Max Return:Q")
+    _rand_rule = _base.mark_rule(
+        strokeDash=[4, 4], color="orange", opacity=0.6
+    ).encode(y="Random Baseline:Q")
+    _chart = (
+        alt.layer(_box, _points, _max_rule, _rand_rule)
+        .properties(width=250, height=250)
+        .interactive()
+        .facet(column=alt.Column("Environment:N"))
+        .resolve_scale(y="independent")
+    )
+    _chart
     return
 
 
 @app.cell
 def _(
-    ALGO_COLORS,
-    DPI,
-    FIGURES_DIR,
-    TEX_WIDTH,
-    env_configs,
+    ALGO_LABELS,
+    algo_color_domain,
+    algo_score_matrices,
+    all_algos,
+    alt,
     env_slugs,
-    eval_results,
-    mo,
-    plt,
-    se_data,
-    set_size,
+    pd,
 ):
-    # --- Per-env sample efficiency: IQM over training ---
-    _figs = []
-    for _slug in env_slugs:
-        _sd = se_data[_slug]
-        _ts = _sd["timesteps"] / 1000
-        _iqm = _sd["iqm"]
-        _ci_lo = _sd["ci_low"]
-        _ci_hi = _sd["ci_high"]
-        _auc = eval_results["per_environment"][_slug]["sample_efficiency_auc"]
-        _env_name = env_configs[_slug]["environment"]
-        _c = ALGO_COLORS["a2c"]
+    # --- Per-seed normalized score heatmap ---
+    _n_seeds = algo_score_matrices[all_algos[0]].shape[0]
 
-        _fig, _ax = plt.subplots(figsize=set_size(TEX_WIDTH))
-        _ax.plot(_ts, _iqm, color=_c, linewidth=1.0, label="IQM")
-        _ax.fill_between(_ts, _ci_lo, _ci_hi, alpha=0.2, color=_c)
-        _ax.axhline(
-            1.0, color="gray", linestyle="--", alpha=0.5, label="Max normalized"
+    _heat_records = []
+    for _algo in all_algos:
+        _sm = algo_score_matrices[_algo]
+        for _si in range(_n_seeds):
+            for _ei, _slug in enumerate(env_slugs):
+                _val = float(_sm[_si, _ei])
+                _heat_records.append({
+                    "Seed": _si,
+                    "Environment": _slug,
+                    "Algorithm": ALGO_LABELS[_algo],
+                    "Normalized Score": _val,
+                    "label": f"{_val:.2f}",
+                })
+
+    _hdf = pd.DataFrame(_heat_records)
+
+    _rect = (
+        alt.Chart(_hdf)
+        .mark_rect()
+        .encode(
+            x=alt.X("Environment:N"),
+            y=alt.Y("Seed:O"),
+            color=alt.Color(
+                "Normalized Score:Q",
+                scale=alt.Scale(scheme="redyellowgreen", domain=[0, 1]),
+            ),
+            tooltip=["Algorithm:N", "Environment:N", "Seed:O", "Normalized Score:Q"],
         )
-        _ax.set_xlabel(r"Timesteps ($\times 10^3$)")
-        _ax.set_ylabel("Normalized IQM")
-        _ax.set_title(f"Sample Efficiency — {_env_name} (AUC $= {_auc:.3f}$)")
-        _ax.legend()
-        _fig.tight_layout()
-        _fig.savefig(
-            FIGURES_DIR / f"sample_efficiency_{_slug}.png",
-            format="png",
-            dpi=DPI,
-            bbox_inches="tight",
+    )
+    _text = (
+        alt.Chart(_hdf)
+        .mark_text(fontSize=9)
+        .encode(
+            x=alt.X("Environment:N"),
+            y=alt.Y("Seed:O"),
+            text="label:N",
+            color=alt.condition(
+                'datum["Normalized Score"] < 0.4 || datum["Normalized Score"] > 0.8',
+                alt.value("white"),
+                alt.value("black"),
+            ),
         )
-        _figs.append(_fig)
-    mo.vstack(_figs)
+    )
+    _chart = (
+        (_rect + _text)
+        .properties(width=120, height=300)
+        .facet(column=alt.Column("Algorithm:N", sort=algo_color_domain))
+    )
+    _chart
     return
 
 
 @app.cell
-def _(ALGO_COLORS, DPI, FIGURES_DIR, TEX_WIDTH, eval_results, plt, set_size):
-    # --- Cross-env: Final performance bar chart with 95% CI ---
-    _ce = eval_results["cross_environment"]
+def _(
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_score_matrices,
+    all_algos,
+    alt,
+    env_configs,
+    env_slugs,
+    mo,
+    pd,
+):
+    # --- Per-seed box/swarm analysis with anomaly detection ---
+    _all_records = []
+    _anomaly_records = []
+    for _i, _slug in enumerate(env_slugs):
+        _env_name = env_configs[_slug]["environment"]
+        for _algo in all_algos:
+            _sm = algo_score_matrices[_algo]
+            _norm_scores = _sm[:, _i]
+            for _si, _score in enumerate(_norm_scores):
+                _all_records.append({
+                    "Normalized Score": float(_score),
+                    "Algorithm": ALGO_LABELS[_algo],
+                    "Environment": _env_name,
+                    "Seed": _si,
+                })
+                if _score < 0:
+                    _anomaly_records.append({
+                        "Algorithm": ALGO_LABELS[_algo],
+                        "Environment": _slug,
+                        "Seed Index": _si,
+                        "Normalized Score": f"{float(_score):.4f}",
+                    })
+
+    _df = pd.DataFrame(_all_records)
+    _df["Baseline"] = 0.0
+
+    _base = alt.Chart(_df)
+    _box = _base.mark_boxplot(extent="min-max", size=30, median={"color": "black"}).encode(
+        x=alt.X("Algorithm:N"),
+        y=alt.Y("Normalized Score:Q"),
+        color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+    )
+    _points = _base.mark_circle(size=25, opacity=0.6).encode(
+        x=alt.X("Algorithm:N"),
+        y=alt.Y("Normalized Score:Q"),
+        color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+        tooltip=["Algorithm:N", "Normalized Score:Q", "Seed:Q"],
+    )
+    _baseline = _base.mark_rule(
+        strokeDash=[4, 4], color="orange", opacity=0.7
+    ).encode(y="Baseline:Q")
+    _baseline_label = _base.mark_text(
+        align="left", dy=-8, fontSize=9, color="orange",
+    ).encode(
+        y="Baseline:Q",
+        text=alt.value("Random baseline"),
+        x=alt.value(0),
+    )
+    _chart = (
+        alt.layer(_box, _points, _baseline, _baseline_label)
+        .properties(width=250, height=250)
+        .interactive()
+        .facet(column=alt.Column("Environment:N"))
+        .resolve_scale(y="independent")
+    )
+
+    if _anomaly_records:
+        _anom_df = pd.DataFrame(_anomaly_records)
+        _anom_md = f"\n\n**Anomalous seeds** (score below random baseline):\n\n{_anom_df.to_markdown(index=False)}"
+    else:
+        _anom_md = "\n\n*No anomalous seeds detected (all scores above random baseline).*"
+
+    mo.vstack([_chart, mo.md(_anom_md)])
+    return
+
+
+@app.cell
+def _(
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_se_data,
+    algo_selection,
+    all_algos,
+    alt,
+    env_configs,
+    env_slugs,
+    mo,
+    pd,
+):
+    # --- Per-env sample efficiency: IQM over training, all algos overlaid ---
+    _views = []
+    for _slug in env_slugs:
+        _env_name = env_configs[_slug]["environment"]
+        _records = []
+        for _algo in all_algos:
+            if _slug not in algo_se_data[_algo]:
+                continue
+            _sd = algo_se_data[_algo][_slug]
+            _ts = _sd["timesteps"] / 1000
+            for _k in range(len(_ts)):
+                _records.append({
+                    "Timesteps (k)": float(_ts[_k]),
+                    "IQM": float(_sd["iqm"][_k]),
+                    "CI Low": float(_sd["ci_low"][_k]),
+                    "CI High": float(_sd["ci_high"][_k]),
+                    "Algorithm": ALGO_LABELS[_algo],
+                })
+
+        _df = pd.DataFrame(_records)
+        _sel = algo_selection()
+        _line = (
+            alt.Chart(_df)
+            .mark_line()
+            .encode(
+                x=alt.X("Timesteps (k):Q"),
+                y=alt.Y("IQM:Q"),
+                color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+                opacity=alt.condition(_sel, alt.value(1), alt.value(0.15)),
+                tooltip=["Algorithm:N", "Timesteps (k):Q", "IQM:Q"],
+            )
+            .add_params(_sel)
+        )
+        _band = (
+            alt.Chart(_df)
+            .mark_area(opacity=0.12)
+            .encode(
+                x="Timesteps (k):Q",
+                y="CI Low:Q",
+                y2="CI High:Q",
+                color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+                opacity=alt.condition(_sel, alt.value(0.12), alt.value(0.02)),
+            )
+            .add_params(_sel)
+        )
+        _ref = (
+            alt.Chart(pd.DataFrame([{"y": 1.0}]))
+            .mark_rule(strokeDash=[4, 4], color="gray", opacity=0.5)
+            .encode(y="y:Q")
+        )
+        _chart = (_band + _line + _ref).properties(
+            title=f"Sample Efficiency — {_env_name}",
+            width=450,
+            height=280,
+        ).interactive()
+        _views.append(_chart)
+
+    mo.vstack(_views)
+    return
+
+
+@app.cell
+def _(
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_se_data,
+    algo_selection,
+    all_algos,
+    alt,
+    env_configs,
+    env_slugs,
+    pd,
+):
+    # --- Combined sample efficiency: all envs, all algos ---
+    _all_records = []
+    for _slug in env_slugs:
+        _env_name = env_configs[_slug]["environment"]
+        for _algo in all_algos:
+            if _slug not in algo_se_data[_algo]:
+                continue
+            _sd = algo_se_data[_algo][_slug]
+            _ts = _sd["timesteps"] / 1000
+            for _k in range(len(_ts)):
+                _all_records.append({
+                    "Timesteps (k)": float(_ts[_k]),
+                    "IQM": float(_sd["iqm"][_k]),
+                    "Algorithm": ALGO_LABELS[_algo],
+                    "Environment": _env_name,
+                })
+
+    _df = pd.DataFrame(_all_records)
+    _df["Max Normalized"] = 1.0
+    _sel = algo_selection()
+    _env_order = [env_configs[s]["environment"] for s in env_slugs]
+
+    _base = alt.Chart(_df)
+    _lines = (
+        _base
+        .mark_line(strokeWidth=1.5)
+        .encode(
+            x=alt.X("Timesteps (k):Q"),
+            y=alt.Y("IQM:Q"),
+            color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+            opacity=alt.condition(_sel, alt.value(1), alt.value(0.15)),
+            tooltip=["Algorithm:N", "Timesteps (k):Q", "IQM:Q", "Environment:N"],
+        )
+        .add_params(_sel)
+    )
+    _ref_rule = _base.mark_rule(
+        strokeDash=[4, 4], color="gray", opacity=0.5
+    ).encode(y="Max Normalized:Q")
+    _chart = (
+        alt.layer(_lines, _ref_rule)
+        .properties(width=280, height=200)
+        .interactive()
+        .facet(column=alt.Column("Environment:N", sort=_env_order))
+    )
+    _chart
+    return
+
+
+@app.cell
+def _(
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_color_domain,
+    algo_eval_results,
+    all_algos,
+    alt,
+    mo,
+    pd,
+):
+    # --- Cross-env: Grouped bar chart with 95% CI + error bars + value labels ---
+    _algos_with_ce = [
+        a for a in all_algos if algo_eval_results[a].get("cross_environment")
+    ]
+    mo.stop(
+        not _algos_with_ce,
+        mo.md("*Cross-environment metrics skipped (need >= 2 environments).*"),
+    )
+
     _metric_names = ["mean", "median", "iqm"]
     _labels = ["Mean", "Median", "IQM"]
-    _points = [_ce[_m]["point"] for _m in _metric_names]
-    _ci_lows = [_ce[_m]["ci_low"] for _m in _metric_names]
-    _ci_highs = [_ce[_m]["ci_high"] for _m in _metric_names]
-    _errors_low = [_p - _lo for _p, _lo in zip(_points, _ci_lows)]
-    _errors_high = [_hi - _p for _p, _hi in zip(_points, _ci_highs)]
+    _bar_records = []
+    for _algo in _algos_with_ce:
+        _ce = algo_eval_results[_algo]["cross_environment"]
+        for _mi, _m in enumerate(_metric_names):
+            _bar_records.append({
+                "Metric": _labels[_mi],
+                "Algorithm": ALGO_LABELS[_algo],
+                "Value": _ce[_m]["point"],
+                "CI Low": _ce[_m]["ci_low"],
+                "CI High": _ce[_m]["ci_high"],
+            })
 
-    _fig, _ax = plt.subplots(figsize=set_size(TEX_WIDTH, fraction=0.75))
-    _x = range(len(_labels))
-    _bars = _ax.bar(
-        _x,
-        _points,
-        yerr=[_errors_low, _errors_high],
-        capsize=4,
-        color=ALGO_COLORS["a2c"],
-        alpha=0.8,
-        width=0.5,
-    )
-    for _bar, _val in zip(_bars, _points):
-        _ax.text(
-            _bar.get_x() + _bar.get_width() / 2,
-            _bar.get_height() / 2,
-            f"{_val:.3f}",
-            ha="center",
-            va="center",
-            fontweight="bold",
-            color="white",
+    _bdf = pd.DataFrame(_bar_records)
+
+    _bars = (
+        alt.Chart(_bdf)
+        .mark_bar()
+        .encode(
+            x=alt.X("Algorithm:N", sort=algo_color_domain),
+            y=alt.Y("Value:Q", scale=alt.Scale(domain=[0, 1.1])),
+            color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+            tooltip=["Algorithm:N", "Metric:N", "Value:Q", "CI Low:Q", "CI High:Q"],
         )
-    _ax.set_xticks(list(_x))
-    _ax.set_xticklabels(_labels)
-    _ax.set_ylabel("Normalized Score")
-    _ax.set_title(r"Cross-Environment Final Performance (95\% Bootstrap CI)")
-    _ax.set_ylim(0, 1.1)
-    _fig.tight_layout()
-    _fig.savefig(
-        FIGURES_DIR / "final_performance.png",
-        format="png",
-        dpi=DPI,
-        bbox_inches="tight",
     )
-    _fig
+    _errorbars = (
+        alt.Chart(_bdf)
+        .mark_rule(strokeWidth=1.5)
+        .encode(
+            x=alt.X("Algorithm:N", sort=algo_color_domain),
+            y=alt.Y("CI Low:Q"),
+            y2=alt.Y2("CI High:Q"),
+        )
+    )
+    _err_ticks_lo = (
+        alt.Chart(_bdf)
+        .mark_tick(thickness=1.5, size=8)
+        .encode(
+            x=alt.X("Algorithm:N", sort=algo_color_domain),
+            y=alt.Y("CI Low:Q"),
+        )
+    )
+    _err_ticks_hi = (
+        alt.Chart(_bdf)
+        .mark_tick(thickness=1.5, size=8)
+        .encode(
+            x=alt.X("Algorithm:N", sort=algo_color_domain),
+            y=alt.Y("CI High:Q"),
+        )
+    )
+    _val_labels = (
+        alt.Chart(_bdf)
+        .mark_text(color="white", fontWeight="bold", fontSize=10, dy=12)
+        .encode(
+            x=alt.X("Algorithm:N", sort=algo_color_domain),
+            y=alt.Y("Value:Q"),
+            text=alt.Text("Value:Q", format=".2f"),
+        )
+    )
+    _chart = (
+        (_bars + _errorbars + _err_ticks_lo + _err_ticks_hi + _val_labels)
+        .properties(width=150, height=280, title="Cross-Environment Final Performance (95% Bootstrap CI)")
+        .facet(column=alt.Column("Metric:N", sort=_labels))
+    )
+    _chart
     return
 
 
 @app.cell
 def _(
-    ALGO_COLORS,
-    DPI,
-    FIGURES_DIR,
-    TEX_WIDTH,
-    eval_results,
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_eval_results,
+    algo_selection,
+    all_algos,
+    alt,
+    mo,
     np,
-    plt,
-    set_size,
+    pd,
 ):
-    # --- Cross-env: Performance profile ---
-    _pp = eval_results["cross_environment"]["performance_profile"]
-    _tau = np.array(_pp["tau"])
-    _vals = np.array(_pp["values"])
-    _ci_low = np.array(_pp["ci_low"])
-    _ci_high = np.array(_pp["ci_high"])
-
-    _fig, _ax = plt.subplots(figsize=set_size(TEX_WIDTH, fraction=0.75))
-    _c = ALGO_COLORS["a2c"]
-    _ax.plot(_tau, _vals, color=_c, linewidth=1.0, label="A2C")
-    _ax.fill_between(_tau, _ci_low, _ci_high, alpha=0.2, color=_c)
-    _ax.set_xlabel(r"Normalized Score Threshold ($\tau$)")
-    _ax.set_ylabel(r"Fraction of Runs $\geq \tau$")
-    _ax.set_title("Cross-Environment Performance Profile")
-    _ax.set_xlim(0, 1)
-    _ax.set_ylim(0, 1.05)
-    _ax.legend()
-    _fig.tight_layout()
-    _fig.savefig(
-        FIGURES_DIR / "performance_profile.png",
-        format="png",
-        dpi=DPI,
-        bbox_inches="tight",
+    # --- Cross-env: Performance profile, all algos overlaid ---
+    _algos_with_pp = [
+        a
+        for a in all_algos
+        if algo_eval_results[a].get("cross_environment", {}).get("performance_profile")
+    ]
+    mo.stop(
+        not _algos_with_pp,
+        mo.md("*Performance profile skipped (need >= 2 environments).*"),
     )
-    _fig
+
+    _pp_records = []
+    for _algo in _algos_with_pp:
+        _pp = algo_eval_results[_algo]["cross_environment"]["performance_profile"]
+        _tau = np.array(_pp["tau"])
+        _vals = np.array(_pp["values"])
+        _ci_low = np.array(_pp["ci_low"])
+        _ci_high = np.array(_pp["ci_high"])
+        for _k in range(len(_tau)):
+            _pp_records.append({
+                "Threshold": float(_tau[_k]),
+                "Fraction": float(_vals[_k]),
+                "CI Low": float(_ci_low[_k]),
+                "CI High": float(_ci_high[_k]),
+                "Algorithm": ALGO_LABELS[_algo],
+            })
+
+    _pdf = pd.DataFrame(_pp_records)
+    _sel = algo_selection()
+    _line = (
+        alt.Chart(_pdf)
+        .mark_line()
+        .encode(
+            x=alt.X(
+                "Threshold:Q",
+                title="Normalized Score Threshold (tau)",
+            ),
+            y=alt.Y(
+                "Fraction:Q",
+                title="Fraction of Runs >= tau",
+                scale=alt.Scale(domain=[0, 1.05]),
+            ),
+            color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+            opacity=alt.condition(_sel, alt.value(1), alt.value(0.15)),
+            tooltip=["Algorithm:N", "Threshold:Q", "Fraction:Q"],
+        )
+        .add_params(_sel)
+    )
+    _band = (
+        alt.Chart(_pdf)
+        .mark_area(opacity=0.1)
+        .encode(
+            x="Threshold:Q",
+            y="CI Low:Q",
+            y2="CI High:Q",
+            color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+        )
+    )
+    _chart = (_band + _line).properties(
+        width=500, height=300, title="Performance Profile"
+    ).interactive()
+    _chart
     return
 
 
 @app.cell
-def _(env_slugs, eval_results, mo):
-    # --- Per-environment metrics tables ---
+def _(
+    ALGO_COLOR_SCALE,
+    ALGO_LABELS,
+    algo_color_domain,
+    algo_eval_results,
+    all_algos,
+    alt,
+    mo,
+    pd,
+):
+    # --- Optimality gap bar chart with error bars + value labels ---
+    _algos_with_og = [
+        a
+        for a in all_algos
+        if "optimality_gap" in algo_eval_results[a].get("cross_environment", {})
+    ]
+    mo.stop(
+        not _algos_with_og,
+        mo.md("*Optimality gap skipped (need cross-environment metrics).*"),
+    )
+
+    _og_records = []
+    for _algo in _algos_with_og:
+        _og = algo_eval_results[_algo]["cross_environment"]["optimality_gap"]
+        _og_records.append({
+            "Algorithm": ALGO_LABELS[_algo],
+            "Optimality Gap": _og["point"],
+            "CI Low": _og["ci_low"],
+            "CI High": _og["ci_high"],
+        })
+
+    _odf = pd.DataFrame(_og_records)
+
+    _bars = (
+        alt.Chart(_odf)
+        .mark_bar()
+        .encode(
+            y=alt.Y("Algorithm:N", sort=algo_color_domain),
+            x=alt.X("Optimality Gap:Q"),
+            color=alt.Color("Algorithm:N", scale=ALGO_COLOR_SCALE),
+            tooltip=["Algorithm:N", "Optimality Gap:Q", "CI Low:Q", "CI High:Q"],
+        )
+    )
+    _errorbars = (
+        alt.Chart(_odf)
+        .mark_rule(strokeWidth=1.5)
+        .encode(
+            y=alt.Y("Algorithm:N", sort=algo_color_domain),
+            x=alt.X("CI Low:Q"),
+            x2=alt.X2("CI High:Q"),
+        )
+    )
+    _err_ticks_lo = (
+        alt.Chart(_odf)
+        .mark_tick(thickness=1.5, size=8)
+        .encode(
+            y=alt.Y("Algorithm:N", sort=algo_color_domain),
+            x=alt.X("CI Low:Q"),
+        )
+    )
+    _err_ticks_hi = (
+        alt.Chart(_odf)
+        .mark_tick(thickness=1.5, size=8)
+        .encode(
+            y=alt.Y("Algorithm:N", sort=algo_color_domain),
+            x=alt.X("CI High:Q"),
+        )
+    )
+    _val_labels = (
+        alt.Chart(_odf)
+        .mark_text(align="left", dx=5, fontSize=10)
+        .encode(
+            y=alt.Y("Algorithm:N", sort=algo_color_domain),
+            x=alt.X("CI High:Q"),
+            text=alt.Text("Optimality Gap:Q", format=".3f"),
+        )
+    )
+    _chart = (
+        (_bars + _errorbars + _err_ticks_lo + _err_ticks_hi + _val_labels)
+        .properties(width=400, height=200, title="Optimality Gap (lower is better) — 95% Bootstrap CI")
+    )
+    _chart
+    return
+
+
+@app.cell
+def _(ALGO_LABELS, all_algos, alt, mo, np, pairwise_poi, pd):
+    # --- Probability of improvement heatmap ---
+    mo.stop(
+        not pairwise_poi,
+        mo.md(
+            "*Pairwise P(X>Y) skipped (run `evaluate.py --pairwise-only` first).*"
+        ),
+    )
+
+    _algos_sorted = sorted(all_algos)
+    _n = len(_algos_sorted)
+    _matrix = np.full((_n, _n), 0.5)
+    for _pair, _val in pairwise_poi.items():
+        _parts = _pair.split("_vs_")
+        if len(_parts) != 2:
+            continue
+        _a, _b = _parts
+        if _a in _algos_sorted and _b in _algos_sorted:
+            _i = _algos_sorted.index(_a)
+            _j = _algos_sorted.index(_b)
+            _matrix[_i, _j] = _val
+            _matrix[_j, _i] = 1 - _val
+
+    _labels = [ALGO_LABELS[a] for a in _algos_sorted]
+
+    _poi_records = []
+    for _i in range(_n):
+        for _j in range(_n):
+            _poi_records.append({
+                "Row (X)": _labels[_i],
+                "Column (Y)": _labels[_j],
+                "P(X > Y)": float(_matrix[_i, _j]),
+            })
+    _poi_df = pd.DataFrame(_poi_records)
+
+    _rect = (
+        alt.Chart(_poi_df)
+        .mark_rect()
+        .encode(
+            x=alt.X("Column (Y):N", sort=_labels),
+            y=alt.Y("Row (X):N", sort=_labels),
+            color=alt.Color(
+                "P(X > Y):Q",
+                scale=alt.Scale(scheme="redblue", domain=[0, 1]),
+            ),
+            tooltip=["Row (X):N", "Column (Y):N", "P(X > Y):Q"],
+        )
+        .properties(width=350, height=350, title="Probability of Improvement")
+    )
+    _text = (
+        alt.Chart(_poi_df)
+        .mark_text(fontSize=12, fontWeight="bold")
+        .encode(
+            x=alt.X("Column (Y):N", sort=_labels),
+            y=alt.Y("Row (X):N", sort=_labels),
+            text=alt.Text("P(X > Y):Q", format=".2f"),
+            color=alt.condition(
+                'abs(datum["P(X > Y)"] - 0.5) > 0.25',
+                alt.value("white"),
+                alt.value("black"),
+            ),
+        )
+    )
+    _alt_poi_full = _rect + _text
+
+    # Also show as markdown table
+    _tbl = "| |" + "".join(f" {_l} |" for _l in _labels) + "\n"
+    _tbl += "|---|" + "".join("---|" for _ in _labels) + "\n"
+    for _i in range(_n):
+        _tbl += f"| **{_labels[_i]}** |"
+        for _j in range(_n):
+            _v = _matrix[_i, _j]
+            _bold = "**" if abs(_v - 0.5) > 0.25 else ""
+            _tbl += f" {_bold}{_v:.2f}{_bold} |"
+        _tbl += "\n"
+
+    mo.vstack([
+        _alt_poi_full,
+        mo.md(
+            f"### Pairwise P(X > Y) Table\n\n{_tbl}\n\n"
+            "*Values > 0.5 mean the row algorithm is more likely to outperform the column algorithm.*"
+        ),
+    ])
+    return
+
+
+@app.cell
+def _(
+    ALGO_LABELS,
+    algo_color_domain,
+    algo_color_range,
+    algo_eval_results,
+    all_algos,
+    alt,
+    env_configs,
+    env_slugs,
+    mo,
+    pd,
+):
+    # --- Wall-clock timing visualization ---
+    _time_records = []
+    for _algo in all_algos:
+        _timing = algo_eval_results[_algo].get("timing", {}).get("training", {})
+        for _slug in env_slugs:
+            _time_records.append({
+                "Algorithm": ALGO_LABELS[_algo],
+                "Environment": env_configs[_slug]["environment"],
+                "Training Time (s)": _timing.get(_slug, {}).get("total_seconds", 0),
+            })
+
+    _tdf = pd.DataFrame(_time_records)
+    _alt_bar = (
+        alt.Chart(_tdf)
+        .mark_bar()
+        .encode(
+            x=alt.X("Algorithm:N", sort=algo_color_domain),
+            y=alt.Y("Training Time (s):Q"),
+            color=alt.Color(
+                "Algorithm:N",
+                scale=alt.Scale(domain=algo_color_domain, range=algo_color_range),
+            ),
+            tooltip=["Algorithm:N", "Environment:N", "Training Time (s):Q"],
+        )
+        .properties(width=150, height=250, title="Training Time per Environment")
+        .facet(column=alt.Column("Environment:N"))
+    )
+
+    # Scatter: cost-performance tradeoff
+    _scatter_records = []
+    for _algo in all_algos:
+        _ce = algo_eval_results[_algo].get("cross_environment", {})
+        if not _ce:
+            continue
+        _iqm = _ce["iqm"]["point"]
+        _timing = algo_eval_results[_algo].get("timing", {}).get("training", {})
+        _total_time = sum(
+            _timing.get(_slug, {}).get("total_seconds", 0) for _slug in env_slugs
+        )
+        _scatter_records.append({
+            "Algorithm": ALGO_LABELS[_algo],
+            "Total Training Time (s)": _total_time,
+            "Cross-Env IQM": _iqm,
+        })
+
+    _sdf = pd.DataFrame(_scatter_records) if _scatter_records else pd.DataFrame()
+    _timing_views = [_alt_bar]
+    if not _sdf.empty:
+        _scatter = (
+            alt.Chart(_sdf)
+            .mark_circle(size=120)
+            .encode(
+                x=alt.X("Total Training Time (s):Q"),
+                y=alt.Y("Cross-Env IQM:Q"),
+                color=alt.Color(
+                    "Algorithm:N",
+                    scale=alt.Scale(domain=algo_color_domain, range=algo_color_range),
+                ),
+                tooltip=[
+                    "Algorithm:N",
+                    "Total Training Time (s):Q",
+                    "Cross-Env IQM:Q",
+                ],
+            )
+        )
+        _scatter_labels = (
+            alt.Chart(_sdf)
+            .mark_text(align="left", dx=10, dy=-8, fontSize=10)
+            .encode(
+                x=alt.X("Total Training Time (s):Q"),
+                y=alt.Y("Cross-Env IQM:Q"),
+                text="Algorithm:N",
+            )
+        )
+        _scatter_chart = (_scatter + _scatter_labels).properties(
+            width=350, height=250, title="Cost-Performance Tradeoff"
+        )
+        _timing_views.append(_scatter_chart)
+    mo.vstack(_timing_views)
+    return
+
+
+@app.cell
+def _(algo_eval_results, all_algos, env_slugs, mo):
+    # --- Per-environment metrics tables: all algos side by side ---
     _tables = ""
     for _slug in env_slugs:
-        _pe = eval_results["per_environment"][_slug]
-        _rows = [
-            (
-                "IQM",
-                f"{_pe['final_iqm']['point']:.4f}",
-                f"[{_pe['final_iqm']['ci_low']:.4f}, {_pe['final_iqm']['ci_high']:.4f}]",
-            ),
-            (
-                "Mean",
-                f"{_pe['final_mean']['point']:.4f}",
-                f"[{_pe['final_mean']['ci_low']:.4f}, {_pe['final_mean']['ci_high']:.4f}]",
-            ),
-            (
-                "Median",
-                f"{_pe['final_median']['point']:.4f}",
-                f"[{_pe['final_median']['ci_low']:.4f}, {_pe['final_median']['ci_high']:.4f}]",
-            ),
-            ("IQR (raw)", f"{_pe['reliability']['iqr']:.1f}", "---"),
-            ("CVaR 0.1 (raw)", f"{_pe['reliability']['cvar_01']:.1f}", "---"),
-            ("Min (raw)", f"{_pe['reliability']['min_score']:.1f}", "---"),
-            ("Max (raw)", f"{_pe['reliability']['max_score']:.1f}", "---"),
-            ("Sample Eff. AUC", f"{_pe['sample_efficiency_auc']:.4f}", "---"),
+        _header = (
+            "| Metric |" + "".join(f" {a.upper()} |" for a in all_algos) + "\n"
+        )
+        _sep = "|--------|" + "".join("--------|" for _ in all_algos) + "\n"
+
+        _metric_defs = [
+            ("IQM", "final_iqm"),
+            ("Mean", "final_mean"),
+            ("Median", "final_median"),
         ]
-        _tbl = "| Metric | Value | 95\\% CI |\n|--------|-------|--------|\n"
-        for _name, _val, _ci in _rows:
-            _tbl += f"| {_name} | {_val} | {_ci} |\n"
+        _reliability_defs = [
+            ("IQR (raw)", "iqr"),
+            ("CVaR 0.1 (raw)", "cvar_01"),
+            ("Min (raw)", "min_score"),
+            ("Max (raw)", "max_score"),
+        ]
+
+        _tbl = _header + _sep
+        for _label, _key in _metric_defs:
+            _row = f"| {_label} |"
+            for _algo in all_algos:
+                _pe = algo_eval_results[_algo]["per_environment"].get(_slug)
+                if _pe:
+                    _m = _pe[_key]
+                    _row += f" {_m['point']:.4f} [{_m['ci_low']:.4f}, {_m['ci_high']:.4f}] |"
+                else:
+                    _row += " --- |"
+            _tbl += _row + "\n"
+
+        for _label, _key in _reliability_defs:
+            _row = f"| {_label} |"
+            for _algo in all_algos:
+                _pe = algo_eval_results[_algo]["per_environment"].get(_slug)
+                if _pe:
+                    _row += f" {_pe['reliability'][_key]:.1f} |"
+                else:
+                    _row += " --- |"
+            _tbl += _row + "\n"
+
+        _row = "| Sample Eff. AUC |"
+        for _algo in all_algos:
+            _pe = algo_eval_results[_algo]["per_environment"].get(_slug)
+            if _pe:
+                _row += f" {_pe['sample_efficiency_auc']:.4f} |"
+            else:
+                _row += " --- |"
+        _tbl += _row + "\n"
+
         _tables += f"\n### `{_slug}`\n\n{_tbl}\n"
 
     mo.md(f"""
@@ -482,91 +1187,162 @@ def _(env_slugs, eval_results, mo):
 
     {_tables}
 
-    *Normalized: (raw − random) / (max − random), per Agarwal et al. (2021). Bootstrap CIs use 50,000 resamples.*
+    *Normalized: (raw - random) / (max - random), per Agarwal et al. (2021). Bootstrap CIs use 50,000 resamples.*
     """)
     return
 
 
 @app.cell
-def _(eval_results, mo):
-    # --- Cross-environment aggregate metrics table ---
-    _ce = eval_results["cross_environment"]
-    _rows = [
-        (
-            "IQM",
-            f"{_ce['iqm']['point']:.4f}",
-            f"[{_ce['iqm']['ci_low']:.4f}, {_ce['iqm']['ci_high']:.4f}]",
-        ),
-        (
-            "Mean",
-            f"{_ce['mean']['point']:.4f}",
-            f"[{_ce['mean']['ci_low']:.4f}, {_ce['mean']['ci_high']:.4f}]",
-        ),
-        (
-            "Median",
-            f"{_ce['median']['point']:.4f}",
-            f"[{_ce['median']['ci_low']:.4f}, {_ce['median']['ci_high']:.4f}]",
-        ),
-        (
-            "Optimality Gap",
-            f"{_ce['optimality_gap']['point']:.4f}",
-            f"[{_ce['optimality_gap']['ci_low']:.4f}, {_ce['optimality_gap']['ci_high']:.4f}]",
-        ),
+def _(algo_eval_results, all_algos, mo):
+    # --- Cross-environment aggregate metrics table: all algos side by side ---
+    _algos_with_ce = [
+        a for a in all_algos if algo_eval_results[a].get("cross_environment")
     ]
-    _tbl = "| Metric | Value | 95\\% CI |\n|--------|-------|--------|\n"
-    for _name, _val, _ci in _rows:
-        _tbl += f"| {_name} | {_val} | {_ci} |\n"
+    mo.stop(
+        not _algos_with_ce,
+        mo.md(
+            "*Cross-environment aggregate metrics skipped (need >= 2 environments).*"
+        ),
+    )
 
-    _n_envs = len(eval_results["environments"])
-    _n_seeds = eval_results["n_seeds"]
+    _header = (
+        "| Metric |"
+        + "".join(f" {a.upper()} |" for a in _algos_with_ce)
+        + "\n"
+    )
+    _sep = "|--------|" + "".join("--------|" for _ in _algos_with_ce) + "\n"
+
+    _metric_defs = [
+        ("IQM", "iqm"),
+        ("Mean", "mean"),
+        ("Median", "median"),
+        ("Optimality Gap", "optimality_gap"),
+    ]
+
+    _tbl = _header + _sep
+    for _label, _key in _metric_defs:
+        _row = f"| {_label} |"
+        for _algo in _algos_with_ce:
+            _m = algo_eval_results[_algo]["cross_environment"][_key]
+            _row += (
+                f" {_m['point']:.4f} [{_m['ci_low']:.4f}, {_m['ci_high']:.4f}] |"
+            )
+        _tbl += _row + "\n"
+
+    _first = _algos_with_ce[0]
+    _n_envs = len(algo_eval_results[_first]["environments"])
+    _n_seeds = algo_eval_results[_first]["n_seeds"]
     mo.md(f"""
     ## Cross-Environment Aggregate Metrics
 
-    Score matrix shape: ({_n_seeds}, {_n_envs}) — {_n_seeds * _n_envs} data points.
+    Score matrix shape: ({_n_seeds}, {_n_envs}) --- {_n_seeds * _n_envs} data points.
 
     {_tbl}
 
     *Bootstrap CIs use 50,000 resamples across all environment-seed pairs.*
-
-    **Caveat:** With only M=2 environments, cross-environment aggregates have limited statistical power.
-    These metrics become more informative as more environments are added.
     """)
     return
 
 
 @app.cell
-def _(env_slugs, eval_results, mo, np):
-    # --- Timing / Reproducibility ---
-    _timing = eval_results.get("timing", {})
-    _train_timing = _timing.get("training", {})
-    _eval_timing = _timing.get("evaluation", {})
+def _(ALGO_LABELS, algo_eval_results, all_algos, env_slugs, mo):
+    # --- Summary ranking table ---
+    _algos_with_ce = [
+        a for a in all_algos if algo_eval_results[a].get("cross_environment")
+    ]
+    mo.stop(
+        not _algos_with_ce,
+        mo.md("*Summary ranking skipped (need cross-environment metrics).*"),
+    )
 
+    _rows = []
+    for _algo in _algos_with_ce:
+        _ce = algo_eval_results[_algo]["cross_environment"]
+        _iqm = _ce.get("iqm", {}).get("point", 0)
+        _og = _ce.get("optimality_gap", {}).get("point", 1)
+
+        _timing = algo_eval_results[_algo].get("timing", {}).get("training", {})
+        _total_time = sum(
+            _timing.get(_slug, {}).get("total_seconds", 0) for _slug in env_slugs
+        )
+
+        _per_env = algo_eval_results[_algo].get("per_environment", {})
+        _env_iqms = {
+            _slug: _per_env[_slug]["final_iqm"]["point"]
+            for _slug in env_slugs
+            if _slug in _per_env
+        }
+        _best_env = max(_env_iqms, key=_env_iqms.get) if _env_iqms else "N/A"
+        _worst_env = min(_env_iqms, key=_env_iqms.get) if _env_iqms else "N/A"
+
+        _rows.append({
+            "algo": ALGO_LABELS[_algo],
+            "iqm": _iqm,
+            "og": _og,
+            "time": _total_time,
+            "best": _best_env,
+            "worst": _worst_env,
+        })
+
+    _rows.sort(key=lambda r: r["iqm"], reverse=True)
+
+    _tbl = "| Rank | Algorithm | Cross-Env IQM | Optimality Gap | Training Time (s) | Best Env | Worst Env |\n"
+    _tbl += "|------|-----------|---------------|----------------|-------------------|----------|----------|\n"
+    for _i, _r in enumerate(_rows):
+        _tbl += (
+            f"| {_i + 1} | {_r['algo']} | {_r['iqm']:.4f} | {_r['og']:.4f} "
+            f"| {_r['time']:.1f} | `{_r['best']}` | `{_r['worst']}` |\n"
+        )
+
+    mo.md(f"""
+    ## Summary Rankings
+
+    {_tbl}
+
+    *Ranked by cross-environment IQM (higher is better). Optimality gap: lower is better.*
+    """)
+    return
+
+
+@app.cell
+def _(algo_eval_results, all_algos, env_slugs, mo, np):
+    # --- Timing / Reproducibility: combined table with algo column ---
     _rows = ""
-    for _slug in env_slugs:
-        _tt = _train_timing.get(_slug, {})
-        _per_seed = _tt.get("per_seed_seconds", [])
-        _total_train = _tt.get("total_seconds", 0)
-        _eval_sec = _eval_timing.get("per_env_seconds", {}).get(_slug, 0)
+    for _algo in all_algos:
+        _timing = algo_eval_results[_algo].get("timing", {})
+        _train_timing = _timing.get("training", {})
+        _eval_timing = _timing.get("evaluation", {})
 
-        if _per_seed:
-            _arr = np.array(_per_seed)
-            _mean_s = f"{_arr.mean():.1f}"
-            _std_s = f"{_arr.std():.1f}"
-        else:
-            _mean_s = "---"
-            _std_s = "---"
+        for _slug in env_slugs:
+            _tt = _train_timing.get(_slug, {})
+            _per_seed = _tt.get("per_seed_seconds", [])
+            _total_train = _tt.get("total_seconds", 0)
+            _eval_sec = _eval_timing.get("per_env_seconds", {}).get(_slug, 0)
 
-        _rows += f"| `{_slug}` | {_total_train:.1f} | {_mean_s} | {_std_s} | {_eval_sec:.1f} |\n"
+            if _per_seed:
+                _arr = np.array(_per_seed)
+                _mean_s = f"{_arr.mean():.1f}"
+                _std_s = f"{_arr.std():.1f}"
+            else:
+                _mean_s = "---"
+                _std_s = "---"
 
-    _total_eval = _eval_timing.get("total_seconds", 0)
+            _rows += (
+                f"| {_algo.upper()} | `{_slug}` | {_total_train:.1f} "
+                f"| {_mean_s} | {_std_s} | {_eval_sec:.1f} |\n"
+            )
+
+        _total_eval = _eval_timing.get("total_seconds", 0)
+        _rows += (
+            f"| **{_algo.upper()} total** | | | | | **{_total_eval:.1f}** |\n"
+        )
 
     mo.md(f"""
     ## Reproducibility & Timing
 
-    | Environment | Train Total (s) | Train Mean/Seed (s) | Train Std/Seed (s) | Eval (s) |
-    |-------------|-----------------|---------------------|--------------------|----------|
+    | Algorithm | Environment | Train Total (s) | Train Mean/Seed (s) | Train Std/Seed (s) | Eval (s) |
+    |-----------|-------------|-----------------|---------------------|--------------------|----------|
     {_rows}
-    | **Total eval** | | | | **{_total_eval:.1f}** |
 
     **Note:** Same-seed results are reproducible on same hardware + platform only.
     CPU vs GPU results will differ (PyTorch limitation).
