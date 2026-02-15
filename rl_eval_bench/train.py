@@ -1,9 +1,11 @@
-"""A2C training with deterministic seeding — supports multiple environments.
+"""RL training with deterministic seeding — supports multiple algorithms and environments.
 
 Usage:
-    uv run python train.py --env CartPole-v1              # 15 seeds, 200K steps
-    uv run python train.py --env LunarLander-v3           # 15 seeds, 500K steps
-    uv run python train.py --env LunarLander-v3 --timesteps 750000
+    uv run python train.py --algo a2c --env CartPole-v1
+    uv run python train.py --algo ppo --env LunarLander-v3
+    uv run python train.py --algo dqn --env CartPole-v1
+    uv run python train.py --algo qrdqn --env Acrobot-v1
+    uv run python train.py --algo rppo --env CartPole-v1
     uv run python train.py --env CartPole-v1 --seeds 3 --device cpu
     uv run python train.py --env CartPole-v1 --verify     # determinism check
 """
@@ -20,11 +22,21 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from stable_baselines3 import A2C
+from sb3_contrib import QRDQN, RecurrentPPO
+from stable_baselines3 import A2C, DQN, PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 
-from env_config import ENV_REGISTRY, EnvSpec, N_SEEDS, generate_seeds
+from env_config import ENV_REGISTRY, EnvSpec, N_SEEDS, check_algo_env_compat, generate_seeds
+
+ALGO_MAP: dict[str, type] = {"a2c": A2C, "dqn": DQN, "ppo": PPO, "qrdqn": QRDQN, "rppo": RecurrentPPO}
+ALGO_POLICY: dict[str, str] = {
+    "a2c": "MlpPolicy",
+    "dqn": "MlpPolicy",
+    "ppo": "MlpPolicy",
+    "qrdqn": "MlpPolicy",
+    "rppo": "MlpLstmPolicy",
+}
 
 
 def seed_everything(seed: int) -> None:
@@ -38,10 +50,10 @@ def seed_everything(seed: int) -> None:
 
 
 def train_seed(
-    seed: int, env_spec: EnvSpec, total_timesteps: int, device: str
+    seed: int, env_spec: EnvSpec, total_timesteps: int, device: str, algo: str = "a2c"
 ) -> tuple[Path, float]:
-    """Train A2C for one seed. Returns (seed_dir, elapsed_seconds)."""
-    results_dir = Path("results") / "a2c" / env_spec.slug
+    """Train one seed with the given algorithm. Returns (seed_dir, elapsed_seconds)."""
+    results_dir = Path("results") / algo / env_spec.slug
     seed_dir = results_dir / f"seed_{seed}"
     log_dir = seed_dir / "logs"
     best_model_dir = seed_dir / "best_model"
@@ -66,13 +78,13 @@ def train_seed(
         verbose=0,
     )
 
-    model = A2C("MlpPolicy", train_env, seed=seed, device=device, verbose=0)
+    model = ALGO_MAP[algo](ALGO_POLICY[algo], train_env, seed=seed, device=device, verbose=0)
 
     t0 = time.perf_counter()
     model.learn(total_timesteps=total_timesteps, callback=eval_callback)
     elapsed = time.perf_counter() - t0
 
-    model.save(str(seed_dir / "a2c_final"))
+    model.save(str(seed_dir / f"{algo}_final"))
 
     train_env.close()
     eval_env.close()
@@ -88,17 +100,18 @@ def save_config(
     device: str,
     per_seed_seconds: list[float],
     total_seconds: float,
+    algo: str = "a2c",
 ) -> None:
     """Save training config for reproducibility."""
     import stable_baselines3
 
     from env_config import MASTER_SEED
 
-    results_dir = Path("results") / "a2c" / env_spec.slug
+    results_dir = Path("results") / algo / env_spec.slug
     config = {
-        "algorithm": "A2C",
+        "algorithm": algo,
         "environment": env_spec.env_id,
-        "policy": "MlpPolicy",
+        "policy": ALGO_POLICY.get(algo, "MlpPolicy"),
         "total_timesteps": total_timesteps,
         "max_return": env_spec.max_return,
         "n_envs": env_spec.n_envs,
@@ -120,19 +133,19 @@ def save_config(
         json.dump(config, f, indent=2)
 
 
-def verify_determinism(env_spec: EnvSpec, device: str) -> bool:
+def verify_determinism(env_spec: EnvSpec, device: str, algo: str = "a2c") -> bool:
     """Train a seed twice and assert identical evaluation results."""
-    results_dir = Path("results") / "a2c" / env_spec.slug
+    results_dir = Path("results") / algo / env_spec.slug
     test_seed = generate_seeds(1)[0]
     seed_dir_name = f"seed_{test_seed}"
     print(f"Verifying determinism on {env_spec.env_id}: training seed {test_seed} twice...")
 
-    train_seed(test_seed, env_spec, total_timesteps=50_000, device=device)
+    train_seed(test_seed, env_spec, total_timesteps=50_000, device=device, algo=algo)
     npz1 = np.load(results_dir / seed_dir_name / "logs" / "evaluations.npz")
     ts1, res1 = npz1["timesteps"].copy(), npz1["results"].copy()
 
     shutil.rmtree(results_dir / seed_dir_name)
-    train_seed(test_seed, env_spec, total_timesteps=50_000, device=device)
+    train_seed(test_seed, env_spec, total_timesteps=50_000, device=device, algo=algo)
     npz2 = np.load(results_dir / seed_dir_name / "logs" / "evaluations.npz")
     ts2, res2 = npz2["timesteps"].copy(), npz2["results"].copy()
 
@@ -155,7 +168,14 @@ def verify_determinism(env_spec: EnvSpec, device: str) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train A2C on a gymnasium environment")
+    parser = argparse.ArgumentParser(description="Train an RL algorithm on a gymnasium environment")
+    parser.add_argument(
+        "--algo",
+        type=str,
+        default="a2c",
+        choices=list(ALGO_MAP.keys()),
+        help="algorithm to train (default: a2c)",
+    )
     parser.add_argument(
         "--env",
         type=str,
@@ -173,28 +193,33 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    algo = args.algo
     env_spec = ENV_REGISTRY[args.env]
+    check_algo_env_compat(algo, args.env)
     total_timesteps = args.timesteps if args.timesteps is not None else env_spec.total_timesteps
 
     if args.verify:
-        ok = verify_determinism(env_spec, args.device)
+        ok = verify_determinism(env_spec, args.device, algo=algo)
         sys.exit(0 if ok else 1)
 
     seeds = generate_seeds(args.seeds)
     print(
-        f"Training A2C on {env_spec.env_id}: {len(seeds)} seeds, {total_timesteps} steps each"
+        f"Training {algo.upper()} on {env_spec.env_id}: {len(seeds)} seeds, "
+        f"{total_timesteps} steps each"
     )
 
     per_seed_seconds: list[float] = []
     t_total = time.perf_counter()
     for seed in seeds:
-        _, elapsed = train_seed(seed, env_spec, total_timesteps, args.device)
+        _, elapsed = train_seed(seed, env_spec, total_timesteps, args.device, algo=algo)
         per_seed_seconds.append(elapsed)
     total_elapsed = time.perf_counter() - t_total
 
-    save_config(env_spec, seeds, total_timesteps, args.device, per_seed_seconds, total_elapsed)
+    save_config(
+        env_spec, seeds, total_timesteps, args.device, per_seed_seconds, total_elapsed, algo=algo
+    )
 
-    results_dir = Path("results") / "a2c" / env_spec.slug
+    results_dir = Path("results") / algo / env_spec.slug
     print(f"\nAll done in {total_elapsed:.1f}s. Results in {results_dir}/")
 
 

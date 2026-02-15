@@ -1,9 +1,9 @@
-"""Evaluate trained A2C models and compute rliable metrics (multi-environment).
+"""Evaluate trained models and compute rliable metrics (multi-algorithm, multi-environment).
 
 Usage:
-    uv run python evaluate.py                     # all envs in registry
-    uv run python evaluate.py --envs CartPole-v1  # single env only
-    uv run python evaluate.py --episodes 100      # more eval episodes
+    uv run python evaluate.py --algo a2c                      # all compatible envs
+    uv run python evaluate.py --algo ppo --envs CartPole-v1   # single env
+    uv run python evaluate.py --algo dqn --episodes 100       # more eval episodes
 """
 
 from __future__ import annotations
@@ -11,17 +11,26 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import warnings
 from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
 from rliable import library as rly
 from rliable import metrics
-from stable_baselines3 import A2C
+from scipy.stats import trim_mean
+from sb3_contrib import QRDQN, RecurrentPPO
+from stable_baselines3 import A2C, DQN, PPO
 
-from env_config import ENV_ORDER, ENV_REGISTRY, EnvSpec, normalize_score, generate_seeds
+from env_config import ENV_ORDER, ENV_REGISTRY, EnvSpec, generate_seeds, normalize_score
 
-ALGO_CLASSES: dict[str, type] = {"a2c": A2C}
+ALGO_CLASSES: dict[str, type] = {
+    "a2c": A2C,
+    "dqn": DQN,
+    "ppo": PPO,
+    "qrdqn": QRDQN,
+    "rppo": RecurrentPPO,
+}
 
 RESULTS_DIR = Path("results")
 METRICS_DIR = RESULTS_DIR / "metrics"
@@ -91,11 +100,19 @@ def fresh_evaluate(algo: str, env_spec: EnvSpec, n_episodes: int) -> np.ndarray:
                 obs, _ = env.reset()
             total_reward = 0.0
             done = False
+            lstm_states = None
+            episode_start = True
             while not done:
-                action, _ = model.predict(obs, deterministic=True)
+                action, lstm_states = model.predict(
+                    obs,
+                    state=lstm_states,
+                    episode_start=np.array([episode_start]),
+                    deterministic=True,
+                )
                 obs, reward, terminated, truncated, _ = env.step(action)
                 total_reward += reward
                 done = terminated or truncated
+                episode_start = False
             episode_rewards.append(total_reward)
         env.close()
 
@@ -128,6 +145,12 @@ def load_learning_curves(algo: str, env_spec: EnvSpec) -> tuple[np.ndarray, np.n
         if timesteps is None:
             timesteps = ts
         else:
+            if len(ts) != len(timesteps):
+                warnings.warn(
+                    f"Seed {seed} has {len(ts)} checkpoints vs {len(timesteps)} "
+                    f"expected — truncating to min length",
+                    stacklevel=2,
+                )
             min_len = min(len(timesteps), len(ts))
             timesteps = timesteps[:min_len]
             results = results[:min_len]
@@ -145,6 +168,7 @@ def compute_per_environment_metrics(
     scores_1d: np.ndarray,
     timesteps: np.ndarray,
     reward_matrix: np.ndarray,
+    algo: str = "a2c",
 ) -> dict:
     """Compute per-environment metrics using env-specific max_return."""
     results = {}
@@ -167,7 +191,7 @@ def compute_per_environment_metrics(
 
     # Final performance with 95% stratified bootstrap CI
     score_matrix = scores_1d.reshape(-1, 1)
-    score_dict = {"a2c": normalize_score(score_matrix, random_baseline, env_spec.max_return)}
+    score_dict = {algo: normalize_score(score_matrix, random_baseline, env_spec.max_return)}
 
     iqm_fn = lambda x: metrics.aggregate_iqm(x)
     mean_fn = lambda x: metrics.aggregate_mean(x)
@@ -176,20 +200,16 @@ def compute_per_environment_metrics(
     for name, fn in [("iqm", iqm_fn), ("mean", mean_fn), ("median", median_fn)]:
         point, ci = rly.get_interval_estimates(score_dict, fn, reps=50_000)
         results[f"final_{name}"] = {
-            "point": _scalar(point["a2c"]),
-            "ci_low": _scalar(ci["a2c"][0]),
-            "ci_high": _scalar(ci["a2c"][1]),
+            "point": _scalar(point[algo]),
+            "ci_low": _scalar(ci[algo][0]),
+            "ci_high": _scalar(ci[algo][1]),
         }
 
     # Sample efficiency AUC (normalized, using IQM per checkpoint)
     n_checkpoints = reward_matrix.shape[1]
     iqm_curve = np.zeros(n_checkpoints)
-    n_seeds = reward_matrix.shape[0]
-    q1 = n_seeds // 4
-    q3 = n_seeds - q1
     for i in range(n_checkpoints):
-        col = np.sort(reward_matrix[:, i])
-        iqm_curve[i] = np.mean(col[q1:q3])
+        iqm_curve[i] = trim_mean(reward_matrix[:, i], proportiontocut=0.25)
     iqm_curve_norm = normalize_score(iqm_curve, random_baseline, env_spec.max_return)
     auc = float(np.trapezoid(iqm_curve_norm, timesteps) / timesteps[-1])
     results["sample_efficiency_auc"] = auc
@@ -214,19 +234,21 @@ def compute_per_environment_metrics(
     return results
 
 
-def compute_cross_environment_metrics(score_matrix: np.ndarray) -> dict:
+def compute_cross_environment_metrics(
+    score_matrix: np.ndarray, algo: str = "a2c"
+) -> dict:
     """Compute cross-environment metrics. score_matrix: (n_seeds, M) already normalized."""
     results = {}
-    score_dict = {"a2c": score_matrix}
+    score_dict = {algo: score_matrix}
 
     # IQM + CI
     point, ci = rly.get_interval_estimates(
         score_dict, lambda x: metrics.aggregate_iqm(x), reps=50_000
     )
     results["iqm"] = {
-        "point": _scalar(point["a2c"]),
-        "ci_low": _scalar(ci["a2c"][0]),
-        "ci_high": _scalar(ci["a2c"][1]),
+        "point": _scalar(point[algo]),
+        "ci_low": _scalar(ci[algo][0]),
+        "ci_high": _scalar(ci[algo][1]),
     }
 
     # Aggregate mean/median + CI
@@ -236,9 +258,9 @@ def compute_cross_environment_metrics(score_matrix: np.ndarray) -> dict:
     ]:
         point, ci = rly.get_interval_estimates(score_dict, fn, reps=50_000)
         results[name] = {
-            "point": _scalar(point["a2c"]),
-            "ci_low": _scalar(ci["a2c"][0]),
-            "ci_high": _scalar(ci["a2c"][1]),
+            "point": _scalar(point[algo]),
+            "ci_low": _scalar(ci[algo][0]),
+            "ci_high": _scalar(ci[algo][1]),
         }
 
     # Performance profile
@@ -248,9 +270,9 @@ def compute_cross_environment_metrics(score_matrix: np.ndarray) -> dict:
     )
     results["performance_profile"] = {
         "tau": tau_list.tolist(),
-        "values": perf_profile["a2c"].tolist(),
-        "ci_low": perf_ci["a2c"][0].tolist(),
-        "ci_high": perf_ci["a2c"][1].tolist(),
+        "values": perf_profile[algo].tolist(),
+        "ci_low": perf_ci[algo][0].tolist(),
+        "ci_high": perf_ci[algo][1].tolist(),
     }
 
     # Optimality gap
@@ -260,9 +282,9 @@ def compute_cross_environment_metrics(score_matrix: np.ndarray) -> dict:
         reps=50_000,
     )
     results["optimality_gap"] = {
-        "point": _scalar(point["a2c"]),
-        "ci_low": _scalar(ci["a2c"][0]),
-        "ci_high": _scalar(ci["a2c"][1]),
+        "point": _scalar(point[algo]),
+        "ci_low": _scalar(ci[algo][0]),
+        "ci_high": _scalar(ci[algo][1]),
     }
 
     return results
@@ -273,6 +295,7 @@ def compute_sample_efficiency_curves(
     random_baseline: float,
     timesteps: np.ndarray,
     reward_matrix: np.ndarray,
+    algo: str = "a2c",
 ) -> dict:
     """IQM at each checkpoint via rliable bootstrap."""
     n_checkpoints = len(timesteps)
@@ -284,13 +307,13 @@ def compute_sample_efficiency_curves(
         scores_at_t = normalize_score(
             reward_matrix[:, i : i + 1], random_baseline, env_spec.max_return
         )
-        score_dict = {"a2c": scores_at_t}
+        score_dict = {algo: scores_at_t}
         point, ci = rly.get_interval_estimates(
             score_dict, lambda x: metrics.aggregate_iqm(x), reps=2000
         )
-        iqm_values[i] = _scalar(point["a2c"])
-        ci_low[i] = _scalar(ci["a2c"][0])
-        ci_high[i] = _scalar(ci["a2c"][1])
+        iqm_values[i] = _scalar(point[algo])
+        ci_low[i] = _scalar(ci[algo][0])
+        ci_high[i] = _scalar(ci[algo][1])
 
     return {
         "timesteps": timesteps,
@@ -300,9 +323,37 @@ def compute_sample_efficiency_curves(
     }
 
 
+def compute_pairwise_poi(metrics_dir: Path) -> dict:
+    """Compute P(X>Y) for all algorithm pairs using rliable."""
+    algo_scores = {}
+    for d in sorted(metrics_dir.iterdir()):
+        sm_path = d / "score_matrix.npy"
+        if d.is_dir() and sm_path.exists():
+            algo_scores[d.name] = np.load(sm_path)
+
+    if len(algo_scores) < 2:
+        return {}
+
+    algos = sorted(algo_scores.keys())
+    poi_results = {}
+    for i, a in enumerate(algos):
+        for j, b in enumerate(algos):
+            if i >= j:
+                continue
+            poi = metrics.probability_of_improvement(algo_scores[a], algo_scores[b])
+            poi_results[f"{a}_vs_{b}"] = float(poi)
+    return poi_results
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate trained A2C models")
-    parser.add_argument("--algo", type=str, default="a2c", help="algorithm name")
+    parser = argparse.ArgumentParser(description="Evaluate trained models")
+    parser.add_argument(
+        "--algo",
+        type=str,
+        default="a2c",
+        choices=list(ALGO_CLASSES.keys()),
+        help="algorithm name (default: a2c)",
+    )
     parser.add_argument(
         "--envs",
         type=str,
@@ -313,14 +364,37 @@ def main() -> None:
     parser.add_argument(
         "--episodes", type=int, default=50, help="eval episodes per seed"
     )
+    parser.add_argument(
+        "--pairwise-only",
+        action="store_true",
+        help="only compute pairwise P(X>Y) across all algos (skip per-algo evaluation)",
+    )
     args = parser.parse_args()
+
+    if args.pairwise_only:
+        print("Computing pairwise P(X>Y) across all algorithms...")
+        poi = compute_pairwise_poi(METRICS_DIR)
+        if poi:
+            out_path = METRICS_DIR / "pairwise_poi.json"
+            with open(out_path, "w") as f:
+                json.dump(poi, f, indent=2)
+            print(f"Saved pairwise P(X>Y) to {out_path}")
+            for pair, val in poi.items():
+                print(f"  {pair}: {val:.4f}")
+        else:
+            print("Need >= 2 algos with score_matrix.npy to compute pairwise POI.")
+        return
+
+    algo = args.algo
 
     env_ids = args.envs if args.envs else ENV_ORDER
     env_specs = [ENV_REGISTRY[eid] for eid in env_ids]
 
-    METRICS_DIR.mkdir(parents=True, exist_ok=True)
-    lc_dir = METRICS_DIR / "learning_curves"
-    se_dir = METRICS_DIR / "sample_efficiency"
+    # Per-algo metrics directory
+    algo_metrics_dir = METRICS_DIR / algo
+    algo_metrics_dir.mkdir(parents=True, exist_ok=True)
+    lc_dir = algo_metrics_dir / "learning_curves"
+    se_dir = algo_metrics_dir / "sample_efficiency"
     lc_dir.mkdir(parents=True, exist_ok=True)
     se_dir.mkdir(parents=True, exist_ok=True)
 
@@ -343,18 +417,18 @@ def main() -> None:
 
     for env_spec in env_specs:
         print(f"\n{'='*60}")
-        print(f"Evaluating {args.algo} on {env_spec.env_id} ({args.episodes} episodes/seed)...")
+        print(f"Evaluating {algo} on {env_spec.env_id} ({args.episodes} episodes/seed)...")
         print(f"{'='*60}")
 
         t_env = time.perf_counter()
 
         # Fresh evaluation
-        scores_1d = fresh_evaluate(args.algo, env_spec, args.episodes)
+        scores_1d = fresh_evaluate(algo, env_spec, args.episodes)
         per_env_scores[env_spec.slug] = scores_1d
 
         # Learning curves
         print(f"Loading learning curves for {env_spec.slug}...")
-        timesteps, reward_matrix = load_learning_curves(args.algo, env_spec)
+        timesteps, reward_matrix = load_learning_curves(algo, env_spec)
         np.savez(
             lc_dir / f"{env_spec.slug}.npz",
             timesteps=timesteps,
@@ -370,13 +444,13 @@ def main() -> None:
         _baseline = random_baselines[env_spec.slug]
         print(f"Computing per-environment metrics for {env_spec.slug}...")
         per_env = compute_per_environment_metrics(
-            env_spec, _baseline, scores_1d, timesteps, reward_matrix
+            env_spec, _baseline, scores_1d, timesteps, reward_matrix, algo=algo
         )
 
         # Sample efficiency curves
         print(f"Computing sample efficiency curves for {env_spec.slug}...")
         se_curves = compute_sample_efficiency_curves(
-            env_spec, _baseline, timesteps, reward_matrix
+            env_spec, _baseline, timesteps, reward_matrix, algo=algo
         )
         np.savez(
             se_dir / f"{env_spec.slug}.npz",
@@ -400,34 +474,48 @@ def main() -> None:
             normalize_score(per_env_scores[env_spec.slug], _baseline, env_spec.max_return)
         )
     score_matrix = np.column_stack(normalized_cols)  # (n_seeds, M)
-    np.save(METRICS_DIR / "score_matrix.npy", score_matrix)
+    np.save(algo_metrics_dir / "score_matrix.npy", score_matrix)
 
-    # Cross-environment metrics
-    print(f"\n{'='*60}")
-    print(f"Computing cross-environment metrics on {score_matrix.shape} matrix...")
-    print(f"{'='*60}")
-    cross_env = compute_cross_environment_metrics(score_matrix)
+    # Raw (unnormalized) score matrix
+    raw_score_matrix = np.column_stack(
+        [per_env_scores[ENV_REGISTRY[eid].slug] for eid in env_ids]
+    )
+    np.save(algo_metrics_dir / "raw_score_matrix.npy", raw_score_matrix)
+
+    # Cross-environment metrics (only meaningful with >= 2 envs)
+    cross_env: dict = {}
+    if len(env_specs) >= 2:
+        print(f"\n{'='*60}")
+        print(f"Computing cross-environment metrics on {score_matrix.shape} matrix...")
+        print(f"{'='*60}")
+        cross_env = compute_cross_environment_metrics(score_matrix, algo=algo)
+    else:
+        print("\nSkipping cross-environment metrics (need >= 2 environments).")
 
     # Load training timing from each env's config.json
     training_timing: dict[str, dict] = {}
     for env_spec in env_specs:
         try:
-            config = load_config(args.algo, env_spec)
+            config = load_config(algo, env_spec)
             training_timing[env_spec.slug] = config.get("timing", {})
         except FileNotFoundError:
             training_timing[env_spec.slug] = {}
 
     # Determine actual seed count from first env's config
-    actual_n_seeds = len(load_config(args.algo, env_specs[0])["seeds"])
+    actual_n_seeds = len(load_config(algo, env_specs[0])["seeds"])
 
     # Save combined results
     all_metrics = {
-        "algorithm": args.algo,
+        "algorithm": algo,
         "n_seeds": actual_n_seeds,
+        "seeds": seeds,
         "n_eval_episodes": args.episodes,
         "environments": [es.slug for es in env_specs],
         "random_baselines": random_baselines,
         "random_baseline_details": random_baseline_details,
+        "per_seed_raw_scores": {
+            slug: scores.tolist() for slug, scores in per_env_scores.items()
+        },
         "per_environment": per_env_results,
         "cross_environment": cross_env,
         "timing": {
@@ -438,15 +526,26 @@ def main() -> None:
             "training": training_timing,
         },
     }
-    with open(METRICS_DIR / "evaluation_results.json", "w") as f:
+    with open(algo_metrics_dir / "evaluation_results.json", "w") as f:
         json.dump(all_metrics, f, indent=2)
 
-    print(f"\nMetrics saved to {METRICS_DIR}/")
+    print(f"\nMetrics saved to {algo_metrics_dir}/")
     print(f"  evaluation_results.json — all metrics")
     print(f"  score_matrix.npy — {score_matrix.shape}")
+    print(f"  raw_score_matrix.npy — {raw_score_matrix.shape}")
     for env_spec in env_specs:
         print(f"  learning_curves/{env_spec.slug}.npz")
         print(f"  sample_efficiency/{env_spec.slug}.npz")
+
+    # Compute pairwise P(X>Y) if multiple algos have been evaluated
+    poi = compute_pairwise_poi(METRICS_DIR)
+    if poi:
+        poi_path = METRICS_DIR / "pairwise_poi.json"
+        with open(poi_path, "w") as f:
+            json.dump(poi, f, indent=2)
+        print(f"\nPairwise P(X>Y) saved to {poi_path}")
+        for pair, val in poi.items():
+            print(f"  {pair}: {val:.4f}")
 
 
 if __name__ == "__main__":

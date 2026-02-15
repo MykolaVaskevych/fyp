@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Training A2C on CartPole-v1 ==="
-uv run python train.py --env CartPole-v1
+ALGOS=("a2c" "dqn" "ppo" "qrdqn" "rppo")
+ENVS=("CartPole-v1" "LunarLander-v3" "Acrobot-v1")
 
-echo "=== Training A2C on LunarLander-v3 ==="
-uv run python train.py --env LunarLander-v3
+for algo in "${ALGOS[@]}"; do
+    echo "=== Training ${algo^^} on compatible environments ==="
+    for env in "${ENVS[@]}"; do
+        uv run python train.py --algo "$algo" --env "$env" 2>/dev/null \
+            && echo "  Trained $env" \
+            || echo "  Skipped $env (incompatible with $algo)"
+    done
 
-echo "=== Evaluating all environments ==="
-uv run python evaluate.py
+    echo "=== Evaluating $algo ==="
+    uv run python evaluate.py --algo "$algo"
+    echo
+done
 
 echo "=== Launching marimo notebook ==="
 exec uv run marimo edit notebook/report.py

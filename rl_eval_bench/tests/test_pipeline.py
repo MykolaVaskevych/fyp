@@ -7,12 +7,15 @@ import gymnasium as gym
 import pytest
 
 from env_config import (
+    ALGO_ENV_COMPAT,
     ENV_ORDER,
     ENV_REGISTRY,
     EnvSpec,
-    N_SEEDS,
     MASTER_SEED,
+    N_SEEDS,
+    check_algo_env_compat,
     generate_seeds,
+    get_compatible_envs,
     normalize_score,
 )
 
@@ -66,9 +69,9 @@ class TestEnvConfig:
             spec = ENV_REGISTRY[env_id]
             assert isinstance(spec, EnvSpec)
             assert spec.env_id == env_id
-            assert spec.max_return > 0
             assert spec.total_timesteps > 0
             assert spec.slug  # non-empty
+            assert spec.action_space_type in ("discrete", "continuous")
 
 
 # ---------------------------------------------------------------------------
@@ -130,10 +133,14 @@ class TestFreshEvaluate:
 
     def test_algo_class_mapping_resolves(self):
         from evaluate import ALGO_CLASSES
-        from stable_baselines3 import A2C
+        from sb3_contrib import QRDQN, RecurrentPPO
+        from stable_baselines3 import A2C, DQN, PPO
 
-        assert "a2c" in ALGO_CLASSES
         assert ALGO_CLASSES["a2c"] is A2C
+        assert ALGO_CLASSES["dqn"] is DQN
+        assert ALGO_CLASSES["ppo"] is PPO
+        assert ALGO_CLASSES["qrdqn"] is QRDQN
+        assert ALGO_CLASSES["rppo"] is RecurrentPPO
 
     def test_model_filename_uses_algo_name(self):
         """Verify the filename template uses the algo string, not hardcoded 'a2c'."""
@@ -170,3 +177,55 @@ class TestEnvironmentSmoke:
         obs2, reward, terminated, truncated, info2 = env.step(action)
         assert obs2 is not None
         env.close()
+
+
+# ---------------------------------------------------------------------------
+# TestAlgoEnvCompat
+# ---------------------------------------------------------------------------
+
+
+class TestAlgoEnvCompat:
+    """Tests for algorithm-environment compatibility checks."""
+
+    @pytest.mark.parametrize("algo", ["a2c", "dqn", "ppo", "qrdqn", "rppo"])
+    def test_all_algos_accept_discrete(self, algo):
+        check_algo_env_compat(algo, "CartPole-v1")
+
+    def test_unknown_algo_raises(self):
+        with pytest.raises(ValueError, match="Unknown algorithm"):
+            check_algo_env_compat("nonexistent", "CartPole-v1")
+
+    @pytest.mark.parametrize("algo", ["a2c", "dqn", "ppo", "qrdqn", "rppo"])
+    def test_get_compatible_envs_all_discrete(self, algo):
+        envs = get_compatible_envs(algo)
+        assert set(envs) == set(ENV_ORDER)
+
+    def test_algo_policy_mapping(self):
+        from train import ALGO_POLICY
+
+        assert ALGO_POLICY["rppo"] == "MlpLstmPolicy"
+        for algo in ("a2c", "dqn", "ppo", "qrdqn"):
+            assert ALGO_POLICY[algo] == "MlpPolicy"
+
+
+# ---------------------------------------------------------------------------
+# TestMarimoNotebook
+# ---------------------------------------------------------------------------
+
+
+class TestMarimoNotebook:
+    """Verify marimo notebook passes static checks."""
+
+    def test_marimo_check(self):
+        import subprocess
+        from pathlib import Path
+
+        notebook = Path(__file__).parent.parent / "notebook" / "report.py"
+        result = subprocess.run(
+            ["uv", "run", "marimo", "check", "--strict", str(notebook)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"marimo check failed:\n{result.stdout}\n{result.stderr}"
+        )

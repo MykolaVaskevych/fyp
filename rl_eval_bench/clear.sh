@@ -5,11 +5,17 @@ cd "$(dirname "$0")"
 
 echo "Clearing results..."
 
-# Trained models, checkpoints, logs
-rm -rf results/a2c/*/seed_*
-rm -f results/a2c/*/config.json
+# Trained models, checkpoints, logs, configs (all algorithms)
+for algo in a2c dqn ppo qrdqn rppo; do
+    rm -rf "results/$algo"
+done
 
-# Evaluation metrics
+# Evaluation metrics (all algorithms)
+for algo in a2c dqn ppo qrdqn rppo; do
+    rm -rf "results/metrics/$algo"
+done
+
+# Legacy flat metrics (pre-multi-algo)
 rm -rf results/metrics/learning_curves
 rm -rf results/metrics/sample_efficiency
 rm -f results/metrics/*.json results/metrics/*.npy results/metrics/*.npz
