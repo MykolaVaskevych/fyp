@@ -29,7 +29,7 @@ ENV_REGISTRY: dict[str, EnvSpec] = {
         random_baseline=-20.5,
         total_timesteps=5_000_000,
         eval_freq=25_000,
-        n_envs=8,
+        n_envs=16,
         n_eval_episodes=10,
         action_space_type="discrete",
     ),
@@ -40,7 +40,7 @@ ENV_REGISTRY: dict[str, EnvSpec] = {
         random_baseline=1.5,
         total_timesteps=5_000_000,
         eval_freq=25_000,
-        n_envs=8,
+        n_envs=16,
         n_eval_episodes=10,
         action_space_type="discrete",
     ),
@@ -76,7 +76,11 @@ def get_compatible_envs(algo: str) -> list[str]:
     if algo not in ALGO_ENV_COMPAT:
         raise ValueError(f"Unknown algorithm: {algo!r}")
     supported = ALGO_ENV_COMPAT[algo]
-    return [name for name, spec in ENV_REGISTRY.items() if spec.action_space_type in supported]
+    return [
+        name
+        for name, spec in ENV_REGISTRY.items()
+        if spec.action_space_type in supported
+    ]
 
 
 def normalize_score(

@@ -75,7 +75,7 @@ class TestEnvConfig:
             assert spec.total_timesteps == 5_000_000
             assert spec.slug
             assert spec.action_space_type == "discrete"
-            assert spec.n_envs == 8
+            assert spec.n_envs == 16
 
     def test_only_two_envs(self):
         assert len(ENV_ORDER) == 2

@@ -1,0 +1,33 @@
+{
+  "algorithm": "dqn",
+  "environment": "PongNoFrameskip-v4",
+  "policy": "CnnPolicy",
+  "total_timesteps": 5000000,
+  "max_return": 21.0,
+  "random_baseline": -20.5,
+  "n_envs": 16,
+  "n_stack": 4,
+  "eval_freq": 25000,
+  "n_eval_episodes": 10,
+  "master_seed": 20260215,
+  "seeds": [
+    388465071,
+    2203867355,
+    4187001173,
+    2265705022,
+    1656213059,
+    1072844542,
+    2154394405,
+    614740875,
+    3232067864,
+    3439790210
+  ],
+  "device": "cuda",
+  "sb3_version": "2.7.1",
+  "torch_version": "2.10.0+cu128",
+  "numpy_version": "2.2.6",
+  "timing": {
+    "per_seed_seconds": [],
+    "total_seconds": 0.0
+  }
+}

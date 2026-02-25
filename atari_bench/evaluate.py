@@ -23,6 +23,7 @@ from rliable import metrics
 from scipy.stats import trim_mean
 from stable_baselines3 import DQN, PPO
 from stable_baselines3.common.env_util import make_atari_env
+from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import VecFrameStack
 
 gym.register_envs(ale_py)
@@ -52,29 +53,35 @@ def load_config(algo: str, env_spec: EnvSpec) -> dict:
 def measure_random_baseline(
     env_spec: EnvSpec, seeds: list[int], n_episodes: int
 ) -> tuple[float, dict[int, float]]:
-    """Run a uniform-random agent across seeds and return grand mean + per-seed breakdown."""
+    """Run a uniform-random agent across seeds and return grand mean + per-seed breakdown.
+
+    Uses raw gym.make() (no Atari wrappers) to get true unclipped episode returns.
+    """
     per_seed: dict[int, float] = {}
 
     for seed in seeds:
-        env = make_atari_env(env_spec.env_id, n_envs=1, seed=seed)
-        env = VecFrameStack(env, n_stack=4)
+        env = gym.make(env_spec.env_id)
+        env.action_space.seed(seed)
         returns = []
-        obs = env.reset()
         for ep in range(n_episodes):
+            if ep == 0:
+                obs, _ = env.reset(seed=seed)
+            else:
+                obs, _ = env.reset()
             total_reward = 0.0
             done = False
             while not done:
-                action = [env.action_space.sample()]
-                obs, reward, dones, infos = env.step(action)
-                total_reward += reward[0]
-                done = dones[0]
-                if done:
-                    obs = env.reset()
+                action = env.action_space.sample()
+                obs, reward, terminated, truncated, _ = env.step(action)
+                total_reward += reward
+                done = terminated or truncated
             returns.append(total_reward)
         env.close()
         seed_mean = float(np.mean(returns))
         per_seed[seed] = seed_mean
-        print(f"  seed {seed:>10d}: random baseline = {seed_mean:.2f} ({n_episodes} episodes)")
+        print(
+            f"  seed {seed:>10d}: random baseline = {seed_mean:.2f} ({n_episodes} episodes)"
+        )
 
     grand_mean = float(np.mean(list(per_seed.values())))
     print(f"  Grand mean random baseline: {grand_mean:.2f}")
@@ -82,34 +89,35 @@ def measure_random_baseline(
 
 
 def fresh_evaluate(algo: str, env_spec: EnvSpec, n_episodes: int) -> np.ndarray:
-    """Load each seed's final model, run n_episodes. Returns (n_seeds,) score array."""
+    """Load each seed's final model, run n_episodes. Returns (n_seeds,) score array.
+
+    Uses SB3's evaluate_policy which reads true episode returns from the Monitor
+    wrapper, bypassing ClipRewardEnv and EpisodicLifeEnv.
+    """
     config = load_config(algo, env_spec)
     seeds = config["seeds"]
     algo_cls = ALGO_CLASSES[algo]
     scores = []
 
     for seed in seeds:
-        model_path = RESULTS_DIR / algo / env_spec.slug / f"seed_{seed}" / f"{algo}_final.zip"
+        model_path = (
+            RESULTS_DIR / algo / env_spec.slug / f"seed_{seed}" / f"{algo}_final.zip"
+        )
         model = algo_cls.load(str(model_path), device="cpu")
 
         env = make_atari_env(env_spec.env_id, n_envs=1, seed=seed)
         env = VecFrameStack(env, n_stack=4)
-        episode_rewards = []
-        obs = env.reset()
-        for ep in range(n_episodes):
-            total_reward = 0.0
-            done = False
-            while not done:
-                action, _ = model.predict(obs, deterministic=True)
-                obs, reward, dones, infos = env.step(action)
-                total_reward += reward[0]
-                done = dones[0]
-                if done:
-                    obs = env.reset()
-            episode_rewards.append(total_reward)
+
+        episode_rewards, episode_lengths = evaluate_policy(
+            model,
+            env,
+            n_eval_episodes=n_episodes,
+            deterministic=True,
+            return_episode_rewards=True,
+        )
         env.close()
 
-        mean_reward = np.mean(episode_rewards)
+        mean_reward = float(np.mean(episode_rewards))
         scores.append(mean_reward)
         print(f"  seed {seed:>2d}: mean={mean_reward:.1f} over {n_episodes} episodes")
 
@@ -129,7 +137,12 @@ def load_learning_curves(algo: str, env_spec: EnvSpec) -> tuple[np.ndarray, np.n
 
     for seed in seeds:
         npz_path = (
-            RESULTS_DIR / algo / env_spec.slug / f"seed_{seed}" / "logs" / "evaluations.npz"
+            RESULTS_DIR
+            / algo
+            / env_spec.slug
+            / f"seed_{seed}"
+            / "logs"
+            / "evaluations.npz"
         )
         data = np.load(npz_path)
         ts = data["timesteps"]
@@ -184,7 +197,9 @@ def compute_per_environment_metrics(
 
     # Final performance with 95% stratified bootstrap CI
     score_matrix = scores_1d.reshape(-1, 1)
-    score_dict = {algo: normalize_score(score_matrix, random_baseline, env_spec.max_return)}
+    score_dict = {
+        algo: normalize_score(score_matrix, random_baseline, env_spec.max_return)
+    }
 
     iqm_fn = lambda x: metrics.aggregate_iqm(x)
     mean_fn = lambda x: metrics.aggregate_mean(x)
@@ -404,13 +419,17 @@ def main() -> None:
     for env_spec in env_specs:
         grand_mean, per_seed = measure_random_baseline(env_spec, seeds, args.episodes)
         random_baselines[env_spec.slug] = grand_mean
-        random_baseline_details[env_spec.slug] = {str(k): v for k, v in per_seed.items()}
+        random_baseline_details[env_spec.slug] = {
+            str(k): v for k, v in per_seed.items()
+        }
 
     t_eval_total = time.perf_counter()
 
     for env_spec in env_specs:
         print(f"\n{'=' * 60}")
-        print(f"Evaluating {algo} on {env_spec.env_id} ({args.episodes} episodes/seed)...")
+        print(
+            f"Evaluating {algo} on {env_spec.env_id} ({args.episodes} episodes/seed)..."
+        )
         print(f"{'=' * 60}")
 
         t_env = time.perf_counter()
@@ -464,7 +483,9 @@ def main() -> None:
     for env_spec in env_specs:
         _baseline = random_baselines[env_spec.slug]
         normalized_cols.append(
-            normalize_score(per_env_scores[env_spec.slug], _baseline, env_spec.max_return)
+            normalize_score(
+                per_env_scores[env_spec.slug], _baseline, env_spec.max_return
+            )
         )
     score_matrix = np.column_stack(normalized_cols)  # (n_seeds, M)
     np.save(algo_metrics_dir / "score_matrix.npy", score_matrix)
@@ -523,7 +544,7 @@ def main() -> None:
         json.dump(all_metrics, f, indent=2)
 
     print(f"\nMetrics saved to {algo_metrics_dir}/")
-    print(f"  evaluation_results.json — all metrics")
+    print("  evaluation_results.json — all metrics")
     print(f"  score_matrix.npy — {score_matrix.shape}")
     print(f"  raw_score_matrix.npy — {raw_score_matrix.shape}")
     for env_spec in env_specs:

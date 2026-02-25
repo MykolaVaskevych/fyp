@@ -30,8 +30,11 @@ uv run python evaluate.py --algo dqn
 uv run python evaluate.py --algo ppo --envs Pong
 uv run python evaluate.py --pairwise-only
 
-# Generate figures
+# Generate figures (13 PNGs → results/figures/ + paper_overleaf assets)
 uv run python generate_figures.py
+
+# Interactive notebook
+uv run marimo edit notebook/report.py
 
 # Tests
 uv run pytest tests/
@@ -42,8 +45,9 @@ uv run pytest tests/
 **Pipeline: train.py → evaluate.py → generate_figures.py**
 
 1. `train.py` — Trains DQN or PPO with CnnPolicy on Atari via `make_atari_env()` + `VecFrameStack(4)`. GPU by default. Saves per-seed models to `results/<algo>/<slug>/seed_<N>/`.
-2. `evaluate.py` — Loads models, runs fresh eval with Atari wrappers, computes rliable metrics. Same output format as Experiment 1.
-3. `generate_figures.py` — Publication-quality matplotlib plots.
+2. `evaluate.py` — Loads models, runs fresh eval via SB3's `evaluate_policy` (reads true returns from Monitor wrapper, bypassing ClipRewardEnv/EpisodicLifeEnv). Random baselines use raw `gym.make()`. Computes rliable metrics.
+3. `generate_figures.py` — 13 publication-quality matplotlib figures.
+4. `notebook/report.py` — Interactive marimo notebook with altair charts.
 
 **Key module — `env_config.py`:**
 - `ENV_REGISTRY` has Pong and Breakout with `EnvSpec` dataclasses
@@ -61,7 +65,8 @@ results/
   metrics/<algo>/learning_curves/<slug>.npz
   metrics/<algo>/sample_efficiency/<slug>.npz
   metrics/pairwise_poi.json
-  figures/*.png
+  figures/*.png  (13 figures)
+  notebook/report.py  (marimo notebook)
 ```
 
 ## Key Differences from Experiment 1
@@ -74,6 +79,10 @@ results/
 | Seeds | 15 | 10 |
 | Budget | 200K-500K steps | 5M steps |
 | Device | CPU (deterministic) | GPU (statistical validity) |
+
+## Figures (13)
+
+`learning_curves_pong.png`, `learning_curves_breakout.png`, `combined_learning_curves.png`, `score_distribution.png`, `per_seed_heatmap.png`, `per_seed_boxswarm.png`, `final_performance.png`, `performance_profile.png`, `optimality_gap.png`, `poi_heatmap.png`, `timing_analysis.png`, `sample_efficiency_pong.png`, `sample_efficiency_breakout.png`
 
 ## Rules
 
