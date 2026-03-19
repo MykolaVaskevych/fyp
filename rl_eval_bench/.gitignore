@@ -1,5 +1,6 @@
-# Training results — models, checkpoints, eval logs
-results/
+# Training results — models, checkpoints (keep eval logs for reproducibility)
+results/**/best_model/
+results/**/*_final.zip
 
 # Marimo session state
 __marimo__/
