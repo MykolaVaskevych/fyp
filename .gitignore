@@ -210,6 +210,14 @@ __marimo__/
 checkpoints/
 tensorboard_logs/
 *.mp4
+**/best_model/
+**/*_final.zip
+
+# Experiment 3 - results (training in progress)
+experiment_3/results/
+
+# Misc
+continue
 
 # Archive - large practice dirs, venvs, third-party repos
 archive/fyp/practice/atary/
