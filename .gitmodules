@@ -7,4 +7,4 @@
 	url = git@github.com:MykolaVaskevych/paper_overleaf.git
 [submodule "EfficientZero"]
 	path = EfficientZero
-	url = https://github.com/YeWR/EfficientZero.git
+	url = git@github.com:MykolaVaskevych/EfficientZero.git
