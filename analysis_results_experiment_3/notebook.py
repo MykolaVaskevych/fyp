@@ -28,6 +28,7 @@ def _(Path, alt):
     EXP_DIR = BASE_DIR.parent / "experiment_3"
     RESULTS_DIR = EXP_DIR / "run1_original"
     RESULTS_LOST_DIR = EXP_DIR / "run2_timing_retrain"
+    RESULTS_FINAL_DIR = EXP_DIR / "run3_final_timing"
     METRICS_DIR = RESULTS_DIR / "metrics"
     RETRAINED_EVAL_DIR = BASE_DIR / "retrained_eval"
     FIGURES_DIR = BASE_DIR / "figures"
@@ -56,6 +57,7 @@ def _(Path, alt):
         FIGURES_DIR,
         METRICS_DIR,
         RESULTS_DIR,
+        RESULTS_FINAL_DIR,
         RESULTS_LOST_DIR,
         RETRAINED_EVAL_DIR,
         save_chart,
@@ -1299,17 +1301,27 @@ def _(mo):
 
     **Recovery status:**
     - DQN all 30 seeds: fully recovered via retraining (`run2_timing_retrain/`)
-    - PPO Pong: 7/10 seeds recovered (`run2_timing_retrain/`); 3 seeds permanently missing
-    - PPO Breakout: 6/10 seeds recovered (`run2_timing_retrain/`); 4 seeds permanently missing
+    - PPO Pong: 7/10 seeds recovered (`run2_timing_retrain/`); 3 seeds in `run3_final_timing/`
+    - PPO Breakout: 6/10 seeds recovered (`run2_timing_retrain/`); 4 seeds in `run3_final_timing/`
     - PPO Seaquest: all 10 seeds from original training
 
-    **Coverage: 53/60 seeds have timing (7 permanently missing).**
+    **Coverage: 60/60 seeds have timing (once run3_final_timing/ is populated).**
     """)
     return
 
 
 @app.cell
-def _(EXP_DIR, RESULTS_DIR, RESULTS_LOST_DIR, all_algos, env_slugs, json, mo, pd):
+def _(
+    EXP_DIR,
+    RESULTS_DIR,
+    RESULTS_FINAL_DIR,
+    RESULTS_LOST_DIR,
+    all_algos,
+    env_slugs,
+    json,
+    mo,
+    pd,
+):
     # --- Consolidated timing table ---
     _timing_rows = []
 
@@ -1327,7 +1339,7 @@ def _(EXP_DIR, RESULTS_DIR, RESULTS_LOST_DIR, all_algos, env_slugs, json, mo, pd
                 _orig_cpu = _timing.get("per_seed_cpu_seconds", [])
                 _seeds = _cfg.get("seeds", [])
 
-            # Retrained timing (primary recovery)
+            # Retrained timing (run2 recovery)
             _lost_path = RESULTS_LOST_DIR / _algo / _slug / "config.json"
             _lost_wall = []
             _lost_cpu = []
@@ -1338,7 +1350,18 @@ def _(EXP_DIR, RESULTS_DIR, RESULTS_LOST_DIR, all_algos, env_slugs, json, mo, pd
                 _lost_wall = _ltiming.get("per_seed_wall_seconds", [])
                 _lost_cpu = _ltiming.get("per_seed_cpu_seconds", [])
 
-            # Determine provenance per seed
+            # Final timing (run3 — last 7 missing seeds)
+            _final_path = RESULTS_FINAL_DIR / _algo / _slug / "config.json"
+            _final_wall = []
+            _final_cpu = []
+            if _final_path.exists():
+                with open(_final_path) as _f:
+                    _fcfg = json.load(_f)
+                _ftiming = _fcfg.get("timing", {})
+                _final_wall = _ftiming.get("per_seed_wall_seconds", [])
+                _final_cpu = _ftiming.get("per_seed_cpu_seconds", [])
+
+            # Determine provenance per seed (index-based; all configs share the same 10-seed list)
             for _si in range(10):
                 _wall = None
                 _cpu = None
@@ -1351,6 +1374,10 @@ def _(EXP_DIR, RESULTS_DIR, RESULTS_LOST_DIR, all_algos, env_slugs, json, mo, pd
                 elif _si < len(_lost_wall) and _lost_wall[_si] > 0:
                     _wall = _lost_wall[_si]
                     _cpu = _lost_cpu[_si] if _si < len(_lost_cpu) else None
+                    _source = "recovered"
+                elif _si < len(_final_wall) and _final_wall[_si] > 0:
+                    _wall = _final_wall[_si]
+                    _cpu = _final_cpu[_si] if _si < len(_final_cpu) else None
                     _source = "recovered"
 
                 _timing_rows.append(
@@ -1382,8 +1409,8 @@ def _(EXP_DIR, RESULTS_DIR, RESULTS_LOST_DIR, all_algos, env_slugs, json, mo, pd
     | Provenance | Count |
     |------------|-------|
     | Original (from `run1_original/`) | {_n_orig} |
-    | Recovered (from `run2_timing_retrain/`) | {_n_recov} |
-    | Permanently missing | {_n_miss} |
+    | Recovered (from `run2_timing_retrain/` + `run3_final_timing/`) | {_n_recov} |
+    | Missing (run3 not yet run) | {_n_miss} |
 
     ```
     {_summary_str}
